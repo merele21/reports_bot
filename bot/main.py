@@ -1,18 +1,19 @@
 import asyncio
 import logging
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from bot.config import settings
-from bot.database.engine import init_db
-from bot.handlers import admin, reports, stats
-from bot.middlewares.database import DatabaseMiddleware
-from bot.scheduler.tasks import ReportScheduler
+
+from untitled.bot.config import settings
+from untitled.bot.database.engine import init_db
+from untitled.bot.handlers import admin, reports, stats
+from untitled.bot.middlewares.database import DatabaseMiddleware
+from untitled.bot.scheduler.tasks import ReportScheduler
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ async def main():
     # Создание бота и диспетчера
     bot = Bot(
         token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
 
