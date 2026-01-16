@@ -1,6 +1,17 @@
 from datetime import datetime, date
 from typing import Optional
-from sqlalchemy import String, Integer, DateTime, Date, Time, Boolean, ForeignKey, Text
+
+from sqlalchemy import (
+    String,
+    Integer,
+    DateTime,
+    Date,
+    Time,
+    Boolean,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -12,19 +23,31 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(
+        Integer, unique=True, index=True
+    )  # chat id
+    thread_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True
+    )  # thread (topic) id
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    reports: Mapped[list["Report"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    stats: Mapped[list["Stats"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    reports: Mapped[list["Report"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    stats: Mapped[list["Stats"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Channel(Base):
     __tablename__ = "channels"
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "thread_id", name="uix_chat_thread"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
@@ -37,7 +60,9 @@ class Channel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    reports: Mapped[list["Report"]] = relationship(back_populates="channel", cascade="all, delete-orphan")
+    reports: Mapped[list["Report"]] = relationship(
+        back_populates="channel", cascade="all, delete-orphan"
+    )
 
 
 class Report(Base):
@@ -45,7 +70,9 @@ class Report(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE")
+    )
     report_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     message_id: Mapped[int] = mapped_column(Integer)
@@ -63,7 +90,9 @@ class Stats(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE")
+    )
     reminder_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
     reminder_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

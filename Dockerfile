@@ -16,7 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копирование кода приложения
-COPY bot .
+COPY bot ./bot
 
 # Создание директории для БД (если используется SQLite)
 RUN mkdir -p /app/data

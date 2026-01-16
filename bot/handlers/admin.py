@@ -1,11 +1,12 @@
-from aiogram import Router, F
+import logging
+from datetime import time
+
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import time
 from bot.config import settings
 from bot.database.crud import UserCRUD, ChannelCRUD
-import logging
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def cmd_add_user(message: Message, session: AsyncSession):
             session,
             telegram_id=target_user.id,
             username=target_user.username or "",
-            full_name=target_user.full_name
+            full_name=target_user.full_name,
         )
 
         await message.answer(
@@ -69,7 +70,7 @@ async def cmd_add_user(message: Message, session: AsyncSession):
 @router.message(Command("add_ch"))
 async def cmd_add_channel(message: Message, session: AsyncSession):
     """
-    Зарегистрировать канал для мониторинга
+    Зарегистрировать канал/топик для мониторинга
     Использование: /add_ch отчет1 09:00 ключевое_слово 2
 
     Параметры:
@@ -109,37 +110,56 @@ async def cmd_add_channel(message: Message, session: AsyncSession):
         hour, minute = map(int, deadline_str.split(":"))
         deadline_time = time(hour=hour, minute=minute)
 
-        # Проверяем, не зарегистрирован ли уже канал
-        existing_channel = await ChannelCRUD.get_by_telegram_id(session, message.chat.id)
+        # Получаем thread_id (для топиков)
+        thread_id = message.message_thread_id if message.is_topic_message else None
+
+        # Определяем название (для топиков берем из chat, для обычных групп - title)
+        if message.is_topic_message and hasattr(message, "reply_to_message"):
+            # Для топиков можно попробовать получить название топика
+            title = f"{message.chat.title} - Topic{thread_id}"
+        else:
+            title = message.chat.title or "Unknown"
+
+        # Проверяем, не зарегистрирован ли уже канал/топик
+        existing_channel = await ChannelCRUD.get_by_chat_and_thread(
+            session, message.chat.id, thread_id
+        )
 
         if existing_channel:
-            await message.answer("⚠️ Этот канал уже зарегистрирован!")
+            await message.answer(
+                "⚠️ Этот канал/топик уже зарегистрирован!\n"
+                f"Chat ID: {message.chat.id}\n"
+                f"Thread ID: {thread_id or 'основной чат'}"
+            )
             return
 
         # Создаем канал
         channel = await ChannelCRUD.create(
             session,
             telegram_id=message.chat.id,
-            title=message.chat.title or "Unknown",
+            thread_id=thread_id,
+            title=title,
             report_type=report_type,
             keyword=keyword,
             deadline_time=deadline_time,
-            min_photos=min_photos
+            min_photos=min_photos,
         )
 
         await message.answer(
-            f"✅ Канал зарегистрирован!\n\n"
+            f"✅ Канал/топик зарегистрирован!\n\n"
             f"📋 Параметры:\n"
+            f"• Chat ID: {message.chat.id}\n"
+            f"• Thread ID: {thread_id or 'основной чат'}\n"
             f"• Тип отчета: {channel.report_type}\n"
             f"• Ключевое слово: {channel.keyword}\n"
             f"• Дедлайн: {channel.deadline_time.strftime('%H:%M')}\n"
             f"• Минимум фото: {channel.min_photos}\n\n"
-            f"Теперь бот будет отслеживать отчеты в этом канале!"
+            f"Теперь бот будет отслеживать отчеты в этом {'топике' if thread_id else 'канале'}!"
         )
 
         logger.info(
-            f"Channel registered: {channel.title} ({channel.telegram_id}) "
-            f"by admin {message.from_user.id}"
+            f"Channel registered: {channel.title} (chat_id={channel.telegram_id}, "
+            f"thread_id={channel.thread_id}) by admin {message.from_user.id}"
         )
 
     except ValueError as e:
@@ -169,11 +189,14 @@ async def cmd_list_channels(message: Message, session: AsyncSession):
         await message.answer("📭 Нет зарегистрированных каналов")
         return
 
-    text = "📋 Зарегистрированные каналы:\n\n"
+    text = "📋 Зарегистрированные каналы/топики:\n\n"
 
     for ch in channels:
+        thread_info = f"Thread: {ch.thread_id}" if ch.thread_id else "Основной чат"
         text += (
             f"• {ch.title}\n"
+            f"  Chat ID: {ch.telegram_id}\n"
+            f"  {thread_info}\n"
             f"  Тип: {ch.report_type}\n"
             f"  Ключевое слово: {ch.keyword}\n"
             f"  Дедлайн: {ch.deadline_time.strftime('%H:%M')}\n"

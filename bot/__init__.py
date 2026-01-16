@@ -3,7 +3,7 @@
 
 __version__ = "1.0.0"
 
-# bot/handlers/__init__.py
+# bot/handlers /__init__.py
 """Handlers для обработки команд и сообщений"""
 
 # bot/database/__init__.py

@@ -37,7 +37,10 @@ class ReportScheduler:
                 for channel in channels:
                     # Проверяем, наступил ли дедлайн
                     if current_time >= channel.deadline_time:
-                        logger.info(f"Checking deadline for channel: {channel.title}")
+                        logger.info(
+                            f"Checking deadline for channel: {channel.title} "
+                            f"(chat={channel.telegram_id}, thread={channel.thread_id})"
+                        )
 
                         # Проверяем каждого пользователя
                         for user in users:
@@ -57,14 +60,15 @@ class ReportScheduler:
 
                                 logger.info(
                                     f"Reminder sent: user={user.telegram_id}, "
-                                    f"channel={channel.title}"
+                                    f"channel={channel.title} (chat={channel.telegram_id}, "
+                                    f"thread={channel.thread_id})"
                                 )
 
             except Exception as e:
                 logger.error(f"Error in deadline check: {e}", exc_info=True)
 
     async def send_reminder(self, session: AsyncSession, user, channel):
-        """Отправка напоминания пользователю в канал"""
+        """Отправка напоминания пользователю в канал/топик"""
         try:
             # Формируем текст напоминания
             username_mention = f"@{user.username}" if user.username else user.full_name
@@ -77,13 +81,24 @@ class ReportScheduler:
                 f"Дедлайн: {channel.deadline_time.strftime('%H:%M')}"
             )
 
-            # Отправляем в канал
-            await self.bot.send_message(chat_id=channel.telegram_id, text=reminder_text)
+            # Отправляем с учетом thread_id для топиков
+            if channel.thread_id:
+                # Отправляем в конкретный топик
+                await self.bot.send_message(
+                    chat_id=channel.telegram_id,
+                    text=reminder_text,
+                    message_thread_id=channel.thread_id,
+                )
+            else:
+                # Отправляем в обычный чат
+                await self.bot.send_message(
+                    chat_id=channel.telegram_id, text=reminder_text
+                )
 
         except Exception as e:
             logger.error(
                 f"Error sending reminder to user {user.telegram_id} "
-                f"in channel {channel.telegram_id}: {e}",
+                f"in channel {channel.telegram_id} (thread={channel.thread_id}: {e}",
                 exc_info=True,
             )
 

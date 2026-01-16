@@ -35,6 +35,7 @@ class ChannelCRUD:
     async def create(
         session: AsyncSession,
         telegram_id: int,
+        thread_id: Optional[int],
         title: str,
         report_type: str,
         keyword: str,
@@ -43,6 +44,7 @@ class ChannelCRUD:
     ) -> Channel:
         channel = Channel(
             telegram_id=telegram_id,
+            thread_id=thread_id,
             title=title,
             report_type=report_type,
             keyword=keyword,
@@ -55,10 +57,13 @@ class ChannelCRUD:
         return channel
 
     @staticmethod
-    async def get_by_telegram_id(
-        session: AsyncSession, telegram_id: int
+    async def get_by_chat_and_thread(
+        session: AsyncSession, telegram_id: int, thread_id: Optional[int] = None
     ) -> Optional[Channel]:
-        stmt = select(Channel).where(Channel.telegram_id == telegram_id)
+        """получить канал по telegram_id и thread_id"""
+        stmt = select(Channel).where(
+            Channel.telegram_id == telegram_id, Channel.thread_id == thread_id
+        )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
