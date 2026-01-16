@@ -46,7 +46,7 @@ class Channel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(
-        Integer, unique=True, index=True
+        Integer, nullable=True, index=True
     )  # chat id
     thread_id: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True, index=True

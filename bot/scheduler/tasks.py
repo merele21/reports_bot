@@ -36,7 +36,7 @@ class ReportScheduler:
 
                 for channel in channels:
                     # Проверяем, наступил ли дедлайн
-                    if current_time >= channel.deadline_time:
+                    if current_time == channel.deadline_time:
                         logger.info(
                             f"Checking deadline for channel: {channel.title} "
                             f"(chat={channel.telegram_id}, thread={channel.thread_id})"

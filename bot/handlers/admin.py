@@ -172,7 +172,7 @@ async def cmd_add_channel(message: Message, session: AsyncSession):
         )
         logger.error(f"Error parsing add_ch command: {e}")
     except Exception as e:
-        await message.answer(f"❌ Произошла ошибка: {str(e)}")
+        await message.answer(f"❌ Произошла ошибка!")
         logger.error(f"Error in add_ch command: {e}", exc_info=True)
 
 
