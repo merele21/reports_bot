@@ -7,12 +7,12 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: str
     TECH_CHANNEL_ID: int
-    DATABASE_URL: str = "sqlite+aiosqlite:///./bot_data.db"
-    TZ: str = "Europe/Moscow"
-    MIN_PHOTOS: int = 1
-    STATS_DAY: int = 0  # Monday
-    STATS_HOUR: int = 9
-    STATS_MINUTE: int = 0
+    DATABASE_URL: str
+    TZ: str
+    MIN_PHOTOS: int
+    STATS_DAY: int
+    STATS_HOUR: int
+    STATS_MINUTE: int
 
     class Config:
         env_file = ".env"

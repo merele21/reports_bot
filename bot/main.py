@@ -4,11 +4,11 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from config import settings
-from database.engine import init_db
-from handlers import admin, reports, stats
-from middlewares.database import DatabaseMiddleware
-from scheduler.tasks import ReportScheduler
+from bot.config import settings
+from bot.database.engine import init_db
+from bot.handlers import admin, reports, stats
+from bot.middlewares.database import DatabaseMiddleware
+from bot.scheduler.tasks import ReportScheduler
 
 # Настройка логирования
 logging.basicConfig(

@@ -23,12 +23,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(
-        Integer, unique=True, index=True
-    )  # chat id
-    thread_id: Mapped[Optional[int]] = mapped_column(
-        Integer, nullable=True, index=True
-    )  # thread (topic) id
+    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -50,7 +45,12 @@ class Channel(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(
+        Integer, unique=True, index=True
+    )  # chat id
+    thread_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True
+    )  # thread (topic) id
     title: Mapped[str] = mapped_column(String(255))
     report_type: Mapped[str] = mapped_column(String(100))  # "отчет1", "отчет2"
     keyword: Mapped[str] = mapped_column(String(100))  # Ключевое слово для поиска
