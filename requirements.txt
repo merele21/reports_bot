@@ -1,14 +1,24 @@
+# Core Bot Framework
 aiogram==3.15.0
+
+# Database
 sqlalchemy==2.0.36
 alembic==1.14.0
-apscheduler==3.10.4
 aiosqlite==0.20.0
 asyncpg==0.29.0
 psycopg2-binary==2.9.10
+
+# Scheduler
+apscheduler==3.10.4
+
+# Configuration
 python-dotenv==1.0.1
 pydantic-settings==2.1.0
 pytz==2024.2
 
-# Для работы с изображениями и проверки шаблонов
+# Image Processing (для проверки шаблонов)
 Pillow==10.4.0
 imagehash==4.3.1
+
+# Development Tools (опционально, для hot reload)
+watchdog==4.0.0

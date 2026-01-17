@@ -19,21 +19,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def run_migrations():
-    """Применяет все миграции 'на лету'"""
+    """Применяет все миграции 'на лету' при запуске бота"""
     try:
-        # Указываем путь к файлу конфигурации
+        logger.info("🔄 Running database migrations...")
         alembic_cfg = Config("alembic.ini")
-        # Применяем миграции до последней версии (head)
         command.upgrade(alembic_cfg, "head")
-        logging.info("Alembic: Database is up to date.")
+        logger.info("✅ Database migrations completed successfully")
+    except FileNotFoundError:
+        logger.warning("⚠️ Alembic configuration not found, creating tables directly...")
+        # Если миграций нет, создаем таблицы напрямую
+        asyncio.run(init_db())
     except Exception as e:
-        logging.error(f"Alembic: Error during migration: {e}")
+        logger.error(f"❌ Error during migration: {e}")
+        logger.info("📦 Falling back to direct table creation...")
+        asyncio.run(init_db())
+
 
 async def main():
     """Главная функция запуска бота"""
 
-    # Инициализация базы данных
+    # Автоматическое применение миграций
+    run_migrations()
+
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized")
@@ -57,7 +66,8 @@ async def main():
     scheduler = ReportScheduler(bot)
     scheduler.start()
 
-    logger.info("Bot started")
+    logger.info("🤖 Bot started successfully!")
+    logger.info(f"📊 Stats schedule: Every {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.STATS_DAY]} at {settings.STATS_HOUR:02d}:{settings.STATS_MINUTE:02d}")
 
     try:
         # Запуск бота
@@ -71,9 +81,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Сначала обновляем миграции
-        run_migrations()
-        # Затем запускам самого бота
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")
