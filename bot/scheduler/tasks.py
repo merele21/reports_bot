@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -19,10 +19,15 @@ class ReportScheduler:
     def __init__(self, bot):
         self.bot = bot
         self.scheduler = AsyncIOScheduler(timezone=pytz.timezone(settings.TZ))
+        # cache для отслеживания уже отправленных напоминаний
+        self.reminders_sent_today = set() # {(user_id, channel_id, date)}
 
     async def check_deadlines(self):
-        """Проверка дедлайнов и отправка напоминаний"""
+        """Проверка дедлайнов и отправка напоминаний (один раз спустя 5 минут после установленного дедлайна)"""
         logger.info("Starting deadline check")
+
+        # Чистим cache в начале каждого нового дня
+        self._cleanup_old_reminders()
 
         async with async_session_maker() as session:
             try:
@@ -32,11 +37,20 @@ class ReportScheduler:
                 # Получаем всех активных пользователей
                 users = await UserCRUD.get_all_active(session)
 
-                current_time = datetime.now(pytz.timezone(settings.TZ)).time()
+                current_time = datetime.now(pytz.timezone(settings.TZ))
+                today = current_time.date()
 
                 for channel in channels:
-                    # Проверяем, наступил ли дедлайн
-                    if current_time == channel.deadline_time:
+                    # Создаем datetime (dt) для сегодняшнего дедлайна
+                    deadline_dt = datetime.combine(today, channel.deadline_time)
+                    deadline_dt = pytz.timezone(settings.TZ).localize(deadline_dt)
+
+                    # Окно в 5 минут после дедлайна
+                    check_start = deadline_dt + timedelta(minutes=4)
+                    check_end = check_start + timedelta(seconds=59) # до конца 4 минуты (ровно в 5 минут придет "напоминалка")
+
+                    # Проверяем, находимся ли мы в диапазоне проверки
+                    if check_start <= current_time <= check_end:
                         logger.info(
                             f"Checking deadline for channel: {channel.title} "
                             f"(chat={channel.telegram_id}, thread={channel.thread_id})"
@@ -44,28 +58,50 @@ class ReportScheduler:
 
                         # Проверяем каждого пользователя
                         for user in users:
+                            # Ключ для проверки, отправляли ли напоминание сегодня
+                            reminder_key = (user.id, channel.id, today)
+
                             # Проверяем, сдан ли отчет
                             report = await ReportCRUD.get_today_report(
                                 session, user.id, channel.id
                             )
 
-                            if not report:
-                                # Отчет не сдан - отправляем напоминание
+                            # Проверяем, не отправляли ли уже напоминание сегодня
+                            already_reminded = reminder_key in self.reminders_sent_today
+
+                            if not report and not already_reminded:
+                                # Отчет не сдан и напоминание еще не отправлялось
                                 await self.send_reminder(session, user, channel)
 
-                                # Записываем статистику
+                                # Записываем юзера в еженедельную статистику
                                 await StatsCRUD.add_reminder(
                                     session, user.id, channel.id
                                 )
+
+                                # Помечаем, что напоминание отправлено
+                                self.reminders_sent_today.add(reminder_key)
 
                                 logger.info(
                                     f"Reminder sent: user={user.telegram_id}, "
                                     f"channel={channel.title} (chat={channel.telegram_id}, "
                                     f"thread={channel.thread_id})"
                                 )
+                            elif already_reminded:
+                                logger.debug(
+                                    f"Reminder already sent today: user={user.telegram_id}, "
+                                    f"channel={channel.id}"
+                                )
 
             except Exception as e:
                 logger.error(f"Error in deadline check: {e}", exc_info=True)
+
+    def _cleanup_old_reminders(self):
+        """Очистить cache от старых напоминаний (вчерашних/etc, то есть -- не сегодняшних)"""
+        today = date.today()
+        self.reminders_sent_today = {
+            key for key in self.reminders_sent_today
+            if key[2] == today # key[2] -- это дата
+        }
 
     async def send_reminder(self, session: AsyncSession, user, channel):
         """Отправка напоминания пользователю в канал/топик"""
@@ -136,7 +172,10 @@ class ReportScheduler:
         )
 
         self.scheduler.start()
-        logger.info("Scheduler started")
+        logger.info("Scheduler started. Weekly stats will be sent every "
+                    f"{['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][settings.STATS_DAY]} "
+                    f"at {settings.STATS_HOUR:02d}:{settings.STATS_MINUTE:02d}."
+                    )
 
     def shutdown(self):
         """Остановка планировщика"""

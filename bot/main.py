@@ -4,6 +4,9 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from alembic import command
+from alembic.config import Config
+
 from bot.config import settings
 from bot.database.engine import init_db
 from bot.handlers import admin, reports, stats
@@ -16,6 +19,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def run_migrations():
+    """Применяет все миграции 'на лету'"""
+    try:
+        # Указываем путь к файлу конфигурации
+        alembic_cfg = Config("alembic.ini")
+        # Применяем миграции до последней версии (head)
+        command.upgrade(alembic_cfg, "head")
+        logging.info("Alembic: Database is up to date.")
+    except Exception as e:
+        logging.error(f"Alembic: Error during migration: {e}")
 
 async def main():
     """Главная функция запуска бота"""
@@ -58,6 +71,9 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Сначала обновляем миграции
+        run_migrations()
+        # Затем запускам самого бота
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user")

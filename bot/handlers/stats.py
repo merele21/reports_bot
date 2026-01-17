@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.config import settings
-from bot.database.crud import StatsCRUD
+from bot.database.crud import StatsCRUD, ChannelCRUD
 import logging
 
 router = Router()
@@ -73,8 +73,40 @@ async def send_weekly_stats(bot, session: AsyncSession):
                     f"   Напоминаний: {stat['total_reminders']}\n\n"
                 )
 
-        await bot.send_message(settings.TECH_CHANNEL_ID, text)
-        logger.info("Weekly stats sent to tech channel")
+        # Получаем все каналы с настроенной статистикой
+        channels = await ChannelCRUD.get_all_active(session)
+
+        sent_count = 0
+        for channel in channels:
+            try:
+                # Отправляем в настроенный чат/тред
+                if channel.stats_thread_id:
+                    await bot.send_message(
+                        chat_id=channel.stats_chat_id,
+                        text=text,
+                        message_thread_id=channel.stats_thread_id,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=channel.stats_chat_id, text=text
+                    )
+
+                sent_count += 1
+                logger.info(
+                    f"Weekly stats sent to chat {channel.stats_chat_id}, "
+                    f"thread {channel.stats_thread_id}"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Error sending stats to chat {channel.stats_chat_id}: {e}"
+                )
+
+        if sent_count == 0:
+            logger.warning(
+                "No channels with configured stats destination. "
+                "Use /set_stats_destination to configure"
+            )
 
     except Exception as e:
         logger.error(f"Error sending weekly stats: {e}", exc_info=True)
