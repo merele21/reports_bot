@@ -87,11 +87,11 @@ chmod 600 /home/deploy/.ssh/authorized_keys
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/your-org/report-bot.git
+git clone https://github.com/your_name/report-bot.git
 cd report-bot
 
 # Переключение на vps ветку
-git checkout main-vps
+git checkout vps
 
 # Установка зависимостей
 make install
@@ -109,8 +109,8 @@ nano .env
 your-vps-ip ansible_user=deploy ansible_port=22
 
 [vps:vars]
-git_repo=https://github.com/your-org/report-bot.git
-git_branch=main-vps
+git_repo=https://github.com/your_name/report-bot.git
+git_branch=vps
 ```
 
 ### 5️⃣ Настройка секретов
@@ -244,7 +244,7 @@ rclone copy /opt/report-bot/backups/ gdrive:report-bot-backups/
 
 ### GitHub Actions Pipeline
 
-При push в `main-vps`:
+При push в `vps`:
 
 1. **Lint & Test** ✅
 2. **Build Docker Image** → GitHub Container Registry
@@ -256,7 +256,7 @@ rclone copy /opt/report-bot/backups/ gdrive:report-bot-backups/
 
 ```bash
 # Локально
-git push origin main-vps
+git push origin vps
 
 # Или через Ansible
 make deploy-vps
@@ -324,7 +324,7 @@ Network: 1TB/месяц
 ### Снижение потребления памяти
 
 ```yaml
-# docker-compose.free.yml
+# docker-compose.vps.yml
 services:
   bot:
     deploy:
