@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: str
+    TECH_CHANNEL_ID: str = ""
     SUPER_ADMIN_IDS: str = ""  # Суперадмины (могут добавлять админов)
     DATABASE_URL: str
     TZ: str

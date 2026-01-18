@@ -14,30 +14,53 @@ class UserCRUD:
     async def get_or_create(
         session: AsyncSession, telegram_id: int, username: str, full_name: str
     ) -> User:
+        # 1. Ищем пользователя по ID (это самый надежный идентификатор)
         stmt = select(User).where(User.telegram_id == telegram_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
+        # 2. Логика "Кражи юзернейма" (если username указан и он не пустой)
+        if username:
+            # Ищем, занят ли этот username кем-то ДРУГИМ в базе
+            stmt_check = select(User).where(
+                and_(User.username == username, User.telegram_id != telegram_id)
+            )
+            result_check = await session.execute(stmt_check)
+            other_user_with_same_username = result_check.scalars().all()
+
+            # Если нашли других людей с этим юзернеймом — отбираем его у них
+            for other in other_user_with_same_username:
+                other.username = None  # Или ставим пустую строку ""
+                session.add(other) # Помечаем для обновления
+
         if not user:
+            # Создаем нового пользователя
             user = User(telegram_id=telegram_id, username=username, full_name=full_name)
             session.add(user)
             await session.commit()
             await session.refresh(user)
+        else:
+            # Если пользователь найден — обновляем его данные
+            if user.username != username or user.full_name != full_name:
+                user.username = username
+                user.full_name = full_name
+                session.add(user)
+                await session.commit()
+                await session.refresh(user)
 
         return user
+
+    @staticmethod
+    async def get_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     @staticmethod
     async def get_all_active(session: AsyncSession) -> List[User]:
         stmt = select(User).where(User.is_active == True)
         result = await session.execute(stmt)
         return list(result.scalars().all())
-
-    @staticmethod
-    async def get_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
-        """Получить пользователя по telegram_id"""
-        stmt = select(User).where(User.telegram_id == telegram_id)
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
 
 
 class ChannelCRUD:
@@ -74,7 +97,6 @@ class ChannelCRUD:
     async def get_by_chat_and_thread(
         session: AsyncSession, telegram_id: int, thread_id: Optional[int] = None
     ) -> Optional[Channel]:
-        """Получить канал по telegram_id и thread_id"""
         stmt = select(Channel).where(
             Channel.telegram_id == telegram_id, Channel.thread_id == thread_id
         )
@@ -94,7 +116,6 @@ class ChannelCRUD:
         stats_chat_id: int,
         stats_thread_id: Optional[int],
     ) -> Channel:
-        """Обновить место для отправки еженедельной статистики"""
         stmt = select(Channel).where(Channel.id == channel_id)
         result = await session.execute(stmt)
         channel = result.scalar_one_or_none()
@@ -115,7 +136,6 @@ class ChannelCRUD:
         deadline_time: Optional[time] = None,
         min_photos: Optional[int] = None,
     ) -> Channel:
-        """Обновить параметры события"""
         stmt = select(Channel).where(Channel.id == channel_id)
         result = await session.execute(stmt)
         channel = result.scalar_one_or_none()
@@ -138,7 +158,6 @@ class ChannelCRUD:
 
     @staticmethod
     async def delete_channel(session: AsyncSession, channel_id: int) -> bool:
-        """Удалить канал (мягкое удаление)"""
         stmt = select(Channel).where(Channel.id == channel_id)
         result = await session.execute(stmt)
         channel = result.scalar_one_or_none()
@@ -156,7 +175,6 @@ class UserChannelCRUD:
     async def add_user_to_channel(
         session: AsyncSession, user_id: int, channel_id: int
     ) -> tuple[bool, Optional[UserChannel]]:
-        """Добавить пользователя к каналу"""
         try:
             user_channel = UserChannel(user_id=user_id, channel_id=channel_id)
             session.add(user_channel)
@@ -171,7 +189,6 @@ class UserChannelCRUD:
     async def in_user_in_channel(
         session: AsyncSession, user_id: int, channel_id: int
     ) -> bool:
-        """Проверить, добавлен ли пользователь в канал"""
         stmt = select(UserChannel).where(
             and_(UserChannel.user_id == user_id, UserChannel.channel_id == channel_id)
         )
@@ -182,7 +199,6 @@ class UserChannelCRUD:
     async def get_users_by_channel(
         session: AsyncSession, channel_id: int
     ) -> List[User]:
-        """Получить всех пользователей конкретного канала/треда"""
         stmt = (
             select(User)
             .join(UserChannel, UserChannel.user_id == User.id)
@@ -200,7 +216,6 @@ class UserChannelCRUD:
     async def remove_user_from_channel(
         session: AsyncSession, user_id: int, channel_id: int
     ) -> bool:
-        """Удалить пользователя из канала"""
         stmt = select(UserChannel).where(
             and_(UserChannel.user_id == user_id, UserChannel.channel_id == channel_id)
         )
@@ -224,7 +239,6 @@ class PhotoTemplateCRUD:
         photo_data: bytes,
         description: Optional[str] = None,
     ) -> PhotoTemplate:
-        """Добавить шаблон фотографии"""
         photo_hash = hashlib.md5(photo_data).hexdigest()
 
         try:
@@ -252,7 +266,6 @@ class PhotoTemplateCRUD:
     async def get_templates_for_channel(
         session: AsyncSession, channel_id: int
     ) -> List[PhotoTemplate]:
-        """Получить все шаблоны для канала"""
         stmt = select(PhotoTemplate).where(PhotoTemplate.channel_id == channel_id)
         result = await session.execute(stmt)
         return list(result.scalars().all())
@@ -261,7 +274,6 @@ class PhotoTemplateCRUD:
     async def validate_photo(
         session: AsyncSession, channel_id: int, photo_data: bytes
     ) -> tuple[bool, Optional[str]]:
-        """Проверить, соответствует ли фото шаблону"""
         templates = await PhotoTemplateCRUD.get_templates_for_channel(
             session, channel_id
         )
@@ -366,7 +378,6 @@ class StatsCRUD:
 
     @staticmethod
     async def get_weekly_stats(session: AsyncSession) -> List[dict]:
-        """Получить статистику за неделю"""
         from datetime import timedelta
 
         week_ago = date.today() - timedelta(days=7)

@@ -4,8 +4,6 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from alembic import command
-from alembic.config import Config
 
 from bot.config import settings
 from bot.database.engine import init_db
@@ -20,28 +18,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_migrations():
-    """Применяет все миграции 'на лету' при запуске бота"""
-    try:
-        logger.info("🔄 Running database migrations...")
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("✅ Database migrations completed successfully")
-    except FileNotFoundError:
-        logger.warning("⚠️ Alembic configuration not found, creating tables directly...")
-        # Если миграций нет, создаем таблицы напрямую
-        asyncio.run(init_db())
-    except Exception as e:
-        logger.error(f"❌ Error during migration: {e}")
-        logger.info("📦 Falling back to direct table creation...")
-        asyncio.run(init_db())
-
-
 async def main():
     """Главная функция запуска бота"""
 
-    # Автоматическое применение миграций
-    run_migrations()
 
     logger.info("Initializing database...")
     await init_db()
