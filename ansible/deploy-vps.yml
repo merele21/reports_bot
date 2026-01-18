@@ -1,0 +1,267 @@
+---
+- name: Deploy reports_bot to VPS
+  hosts: vps
+  become: yes
+  vars:
+    app_name: report-bot
+    app_dir: "/opt/{{ app_name }}"
+    deploy_user: "{{ ansible_user }}"
+
+  tasks:
+    # --- initial setup ---
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - git
+          - ufw
+          - htop
+          - ncdu
+        state: present
+
+    # --- docker ---
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Docker
+      block:
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+
+        - name: Install Docker packages
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-compose-plugin
+            state: present
+            update_cache: yes
+
+        - name: Start Docker service
+          systemd:
+            name: docker
+            state: started
+            enabled: yes
+
+        - name: Add user to docker group
+          user:
+            name: "{{ deploy_user }}"
+            groups: docker
+            append: yes
+      when: docker_installed.rc != 0
+
+    # --- firewall ---
+    - name: Configure UFW - Allow Grafana
+      ufw:
+        rule: allow
+        port: '3000'
+        proto: tcp
+
+    - name: Configure UFW - Allow Prometheus
+      ufw:
+        rule: allow
+        port: '9090'
+        proto: tcp
+        from_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+    # --- application ---
+    - name: Create app directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+
+    - name: Clone/Update repository
+      git:
+        repo: "{{ git_repo }}"
+        dest: "{{ app_dir }}"
+        version: "{{ git_branch }}"
+        force: yes
+      become_user: "{{deploy_user }}"
+
+    - name: Create .env file
+      template:
+        src: templates/env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0600'
+
+    - name: Create data directory
+      file:
+        path: "{{ app_dir }}/data"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+
+    - name: Create backups directory
+      file:
+        path: "{{ app_dir }}/backups"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+
+    # --- docker compose ---
+    - name: Start services with Docker Compose
+      community.docker.docker_compose:
+        project_src: "{{ app_dir }}"
+        files:
+          - docker-compose.yml
+          - docker-compose-monitoring.yml
+        pull: yes
+        state: present
+        recreate: smart
+      become_user: "{{ deploy_user }}"
+
+    # --- monitoring ---
+    - name: Wait Grafana to start
+      wait_for:
+        port: 3000
+        delay: 10
+        timeout: 60
+
+    - name: Display Grafana URL
+      debug:
+        msg: "Grafana доступна по адресу: http://{{ ansible_default_ipv4.address }}:3000"
+
+    # --- backup script ---
+    - name: Create backup script
+      template:
+        src: templates/backup-vsp.sh.j2
+        dest: /usr/local/bin/backup-bot.sh
+        mode: '0755'
+
+    - name: Schedule daily backups
+      cron:
+        name: "Daily bot backup"
+        minute: "0"
+        hour: "3"
+        job: "/usr/local/bin/backup-bot.sh >> /var/log/bot-backup.log>&1"
+
+    # --- logrotate ---
+    - name: Configure logrotate
+      copy:
+        content: |
+          {{ app_dir }}/data/*.log {
+            daily
+            rotate 7
+            compress
+            delaycompress
+            notifempty
+            missingok
+            create 0644 {{ deploy_user }} {{ deploy_user }}
+          }
+        dest: /etc/logrotate.d/report-bot
+        mode: '0644'
+
+    # --- systemd service (opt) ---
+    - name: Create systemd service for auto-restart
+      template:
+        src: template/bot.service.j2
+        dest: /etc/systemd/system/report-bot.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable bot service
+      systemd:
+        name: report-bot
+        enabled: yes
+        daemon_reload: yes
+
+    # --- health check
+    - name: Check bot container status
+      command: docker ps --filter "name=report_bot" --format "{{.Status}}"
+      register: bot_status
+      changed_when: false
+
+    - name: Display bot status
+      debug:
+        msg: "Bot status: {{bot_status.stdout }}"
+
+    - name: Final message
+      debug:
+        msg: |
+          -----------------------------------
+          ✅ Deployment completed successfully!
+          
+          Services:
+          - Bot: Running
+          - Grafana: http://{{ ansible_default_ipv4.address }}:3000
+          - Prometheus: http://{{ ansible_default_ipv4.address }}:9090
+          
+          Commands:
+          - View logs: cd {{ app_dir }} && docker-compose logs -f bot
+          - Restart: cd {{ app_dir }} && docker-compose restart
+          - Stop: cd {{ app_dir }} && docker-compose down
+          -----------------------------------
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+# --- post-deployment checks
+- name: Post-deployment validation
+  hosts: vps
+  become: yes
+  tasks:
+    - name: Verify Docker is running
+      command: docker ps
+      register: docker_ps
+      changed_when: false
+
+    - name: Verify bot container exists
+      shell: docker ps | grep report_bot
+      register: bot_container
+      changed_when: false
+      failed_when: bot_container.rc != 0
+
+    - name: Check disk space
+      shell: df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: disk_usage
+      changed_when: false
+
+    - name: Warn of disk space > 80%
+      debug:
+        msg: "⚠️ WARNING: Disk usage is {{ disk_usage.stdout }}%"
+      when: disk_usage.stdout | int > 80
+
+    - name: Check memory usage
+      shell: free -m | grep Mem | awk '{printf "%.0f", ($3/$2)*100}'
+      register: mem_usage
+      changed_when: false
+
+    - name: Display resource usage
+      debug:
+        msg: |
+          Resource usage:
+          - Disk: {{ disk_usage.stdout }}%
+          - Memory: {{ mem_usage.stdout }}%

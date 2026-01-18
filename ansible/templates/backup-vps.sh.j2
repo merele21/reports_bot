@@ -1,0 +1,54 @@
+#!/bin/bash
+# Backup script for Report bot
+
+set -e
+
+APP_DIR="{{ app_dir }}
+BACKUP_DIR="{{ app_dir }}/backups"
+DATE=${date +%Y%m%d_%H%M%S}
+BACKUP_FILE="backup_${DATE}.tar.gz"
+RETENTION_DAYS=7
+
+echo "[$(date)] Starting backup..."
+
+{# Create backup directory if not exists#}
+mkdir -p "${BACKUP_DIR}"
+
+{#Backup sqlite database#}
+if [ -f "${APP_DIR}/data/bot_data.db" ]; then
+  echo "Backing up sqlite database..."
+  sqlite3 "${APP_DIR}/data/bot_data.db" ".backup '${BACKUP_DIR}/bot_data_${DATE}.db'"
+fi
+
+{#Backup entire data directory#}
+echo "Creating compressed backup..."
+tar -czf "${BACKUP_DIR}/${BACKUP_FILE}" \
+  -C "${APP_DIR}" \
+  --exclude='*.log' \
+  --exclude='backups' \
+  --exclude='.git' \
+  data/ .env
+
+{#Get backup size#}
+BACKUP_SIZE=$(du -h "${BACKUP_DIR}/${BACKUP_FILE}" | cut -f1)
+echo "Backup created: ${BACKUP_FILE} (${BACKUP_SIZE})"
+
+{#Delete old backups#}
+echo "Cleaning up old backups (retention: ${RETENTION_DAYS} days..."
+find "${BACKUP_DIR}" -name "backup_*.tar.gz" -mtime +${RETENTION_DAYS} -delete
+find "${BACKUP_DIR}" -name "bot_data_*.db" -mtime +${RETENTION_DAYS} -delete
+
+{#List current backups#}
+echo "Current backups:"
+ls -lh "${BACKUP_DIR}" | grep -E "backup_|bot_data_"
+
+{#Optional: Upload to cloud storage (uncomment if needed)#}
+{#Rclone example:#}
+{#rclone copy "${BACKUP_DIR}/${BACKUP_FILE}" remote:report-bot-backups/#}
+
+{#Optional: Send notification#}
+{#curl -X POST {{ slack_webhook_url }} \#}
+{#  -H 'Content-Type: application/json' \#}
+{#  -d "{\"text\":\"✅ Backup completed: ${BACKUP_FILE} (${BACKUP_SIZE})\"}'#}
+
+echo "[$(date)] Backup completed successfully!"

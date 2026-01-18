@@ -1,0 +1,32 @@
+[Unit]
+Description=Report Bot Docker Compose
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ app_dir }}
+User={{ deploy_user }}
+Group={{ deploy_user }}
+
+{#Start services #}
+ExecStart=/usr/bin/docker compose -f {{ app_dir }}/docker-compose.yml -f {{ app_dir }}/docker-compose.monitoring.yml up -d
+
+{#Stop services #}
+ExecStop=/usr/bin/docker compose -f {{ app_dir }}/docker-compose.yml -f {{  app_dir }}/docker-compose.monitoring.yml down
+
+{#Reload/Restart #}
+ExecReload=/usr/bin/docker compose -f {{ app_dir }}/docker-compose.yml -f {{ app_dir }}/docker-compose.monitoring.yml restart
+
+{#Restart policy #}
+Restart=on-failure
+RestartSec=10s
+
+{#Security #}
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,179 @@
+name: CI/CD Pipeline (VPS)
+
+on:
+  push:
+    branches: [ main-vps, develop-vps ]
+  pull_request:
+    branches: [ main-vps, develop-vps ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # --- lint & test ---
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint with ruff
+        run: ruff check bot/
+        continue-on-error: true
+
+      - name: Format check with black
+        run: black --check bot/
+        continue-on-error: true
+
+      - name: Type check with mypy
+        run: mypy bot/ --ignore-missing-imports
+        continue-on-error: true
+
+      - name: Security check with bandit
+        run: bandit -r bot/ -ll
+        continue-on-error: true
+
+      - name: Run tests
+        run: pytest tests/ -v --cov=bot --cov-report=xml
+        continue-on-error: true
+
+# --- build docker image ---
+build-and-push:
+  needs: lint-and-test
+  runs-on: ubuntu-latest
+  if: github.event_name != 'pull_request'
+  permission:
+    contents: read
+    packages: write
+
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+# --- deploy via ssh ---
+deploy:
+  needs: build-and-push
+  runs-on: ubuntu-latest
+  if: github.ref == 'refs/heads/main-vps'
+
+  steps:
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT || 22 }}
+        script: |
+          # переходим в директорию проекта
+          cd /opt/report-bot || exit 1
+          
+          # pull latest changes
+          git pull origin main-vps
+          
+          # login to github container registry
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          # pull latest image
+          docker-compose pull bot
+          
+          # restart bot
+          docker-compose up -d bot
+          
+          # show status
+          docker-compose ps
+          docker-compose logs --tail=20 bot
+
+    - name: Health check
+      run: |
+        sleep 10
+        # Если у вас есть healthcheck endpoint
+        # curl -f ${{ secrets.VPS_HEALTH_URL }} || exit 1
+        echo "Deployment completed!"
+
+    - name: Notify on success
+      if: success()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: custom
+        custom-payload: |
+          {
+            text: '✅ Deploy success! Branch: ${{ github.ref_name }}',
+            username: 'GitHub Actions',
+            icon_emoji: ':rocket:'
+          }
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      continue-on-error: true
+
+    - name: Notify on failure
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: custom
+        custom-payload: |
+          {
+            text: '❌ Deploy failure! Branch: ${{ github.ref_name }}',
+            username: 'GitHub Actions',
+            icon_emoji: ':x:'
+          }
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      continue-on-error: true
+
+# --- Security scan ---
+security-scan:
+  needs: build-and-push
+  runs-on: ubuntu-latest
+
+  steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        format: 'table'
+        exit-code: '0'
+        ignore-unfixed: true
+        severity: 'CRITICAL,HIGH'
