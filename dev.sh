@@ -19,7 +19,7 @@ watchmedo auto-restart \
   -- python3 -m bot.main
 
 # ============================================
-# Makefile.vps (альтернатива для удобного запуска)
+# Makefile (альтернатива для удобного запуска)
 # ============================================
 .PHONY: dev run migrate clean install help
 
