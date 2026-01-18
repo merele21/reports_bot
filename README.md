@@ -489,9 +489,9 @@ docker-compose logs grafana
 
 ```bash
 # Переключиться на AWS ветку
-git checkout main
+git checkout aws
 
-# Следовать AWS.md
+# Следовать README.md
 # Terraform создаст всю инфраструктуру
 ```
 
