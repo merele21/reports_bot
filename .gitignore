@@ -31,7 +31,8 @@ data/
 *.log
 
 # Docker
-docker-compose.override.yml
+docker-compose.yml
+docker-compose.*.yml
 
 # OS
 .DS_Store
