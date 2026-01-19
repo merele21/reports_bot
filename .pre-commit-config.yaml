@@ -1,0 +1,112 @@
+# Pre-commit hooks для автоматической проверки кода перед коммитом
+# Установка: pip install pre-commit && pre-commit install
+
+repos:
+  # Python formatting
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+        language_version: python3.11
+        args: ['--line-length=88']
+
+  # Import sorting
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ['--profile=black']
+
+  # Linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.8
+    hooks:
+      - id: ruff
+        args: ['--fix']
+
+  # Type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.7.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+        args: ['--ignore-missing-imports']
+
+  # Security
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.6
+    hooks:
+      - id: bandit
+        args: ['-ll', '-i']
+
+  # Generic file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--unsafe']  # Для docker-compose
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+      - id: check-case-conflict
+      - id: check-docstring-first
+
+  # Secrets detection
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '.secrets.baseline'
+
+  # Dockerfile linting
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        args: ['--ignore', 'DL3008', '--ignore', 'DL3013']
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.33.0
+    hooks:
+      - id: yamllint
+        args: ['-d', '{extends: default, rules: {line-length: {max: 120}}}']
+
+  # Markdown
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.38.0
+    hooks:
+      - id: markdownlint
+        args: ['--fix']
+
+  # Commit message linting
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.0.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: []
+
+# Exclude patterns
+exclude: |
+  (?x)^(
+      \.git/|
+      \.venv/|
+      venv/|
+      data/|
+      logs/|
+      backups/|
+      htmlcov/|
+      \.pytest_cache/|
+      \.mypy_cache/|
+      \.ruff_cache/|
+      __pycache__/|
+      .*\.egg-info/
+  )
