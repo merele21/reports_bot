@@ -613,5 +613,3 @@ http://localhost:8000/health
 1. Проверьте [Troubleshooting](#-troubleshooting)
 2. Посмотрите логи: `make logs-bot`
 3. Создайте issue на GitHub
-
-**Happy coding! 🚀**
