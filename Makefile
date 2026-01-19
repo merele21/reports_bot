@@ -253,7 +253,7 @@ init: ## Initialize local environment
 	@echo ""
 	@echo "${YELLOW}Next steps:${RESET}"
 	@echo "  1. Edit .env with your bot token"
-	@echo "  2. Run: ${GREEN}make dev${RESET}"
+	@echo "  2. Run: ${GREEN}make local${RESET}"
 	@echo "  3. Open Grafana: ${BLUE}http://localhost:3000${RESET}"
 
 update-deps: ## Update dependencies
