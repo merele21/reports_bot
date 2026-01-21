@@ -1,0 +1,674 @@
+import logging
+import io
+from datetime import time, datetime
+from typing import Dict
+
+from aiogram import Router, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from bot.config import settings
+from bot.database.crud import UserCRUD, ChannelCRUD, UserChannelCRUD, PhotoTemplateCRUD
+from bot.database.models import User
+
+router = Router()
+logger = logging.getLogger(__name__)
+
+# --- FSM States ---
+class PhotoTemplateStates(StatesGroup):
+    waiting_for_photos = State()
+    waiting_for_description = State()
+
+class EventStates(StatesGroup):
+    waiting_for_event_data = State()
+
+# Временное хранилище
+template_data: Dict[int, dict] = {}
+
+# --- Вспомогательные функции ---
+def is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_list
+
+# --- Обработчики команд ---
+
+@router.message(Command("start"))
+async def cmd_start(message: Message, session: AsyncSession):
+    telegram_id = message.from_user.id
+    existing_user = await UserCRUD.get_by_telegram_id(session, telegram_id)
+    
+    user = await UserCRUD.get_or_create(
+        session,
+        telegram_id=telegram_id,
+        username=message.from_user.username or "",
+        full_name=message.from_user.full_name,
+    )
+    
+    if message.chat.type == "private":
+        if existing_user:
+            await message.answer(
+                f"<b>Вы уже зарегистрированы, {user.full_name}!</b>\n"
+                f"Ваш ID: <code>{user.telegram_id}</code>"
+            )
+        else:
+            await message.answer(
+                f"<b>Привет, {user.full_name}!</b>\n\n"
+                f"Вы успешно зарегистрированы.\n"
+                f"Теперь администратор может добавить вас в группы по тегу @{user.username}."
+            )
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    user_id = message.from_user.id
+    help_text = "<b>Команды:</b>\n\n"
+    help_text += "• /start - Регистрация/Обновление профиля\n"
+    help_text += "• /get_user_id - Узнать ID (свой/reply/username)\n"
+    
+    if is_admin(user_id):
+        help_text += "\n<b>Администрирование:</b>\n"
+        help_text += "• /add_ch - Создать канал/тред\n"
+        help_text += "• /add_event - Настроить отчет (дедлайн, ключ)\n"
+        help_text += "• /add_user - Добавить участника\n"
+        help_text += "• /add_users - Массовое добавление\n"
+        help_text += "• /rm_user - Удалить участника\n"
+        help_text += "• /rm_users - Массовое удаление\n"
+        help_text += "• /add_template - Добавить шаблон фото\n"
+        help_text += "• /list_channels - Список каналов\n"
+
+    await message.answer(help_text)
+
+# --- Управление пользователями ---
+
+@router.message(Command("add_user"))
+async def cmd_add_user(message: Message, command: CommandObject, session: AsyncSession):
+    """Добавление пользователя: Аргументы -> Reply"""
+    if not is_admin(message.from_user.id): return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+    if not channel:
+        await message.answer("Канал не настроен. Сначала используйте /add_ch")
+        return
+
+    target_user = None
+    args = command.args
+
+    # 1. ПРИОРИТЕТ: АРГУМЕНТЫ
+    if args:
+        val = args.replace("@", "").strip()
+        if not val:
+            await message.answer("Некорректный запрос. Введите ID или @username.")
+            return
+
+        if val.isdigit():
+            target_user = await UserCRUD.get_by_telegram_id(session, int(val))
+        else:
+            res = await session.execute(select(User).where(User.username.ilike(val)))
+            target_user = res.scalar_one_or_none()
+            
+        if not target_user:
+             await message.answer(f"Пользователь '{val}' не найден в базе. Пусть нажмет /start.")
+             return
+
+    # 2. ПРИОРИТЕТ: REPLY (с проверкой на фантомный ответ темы)
+    elif message.reply_to_message:
+        # Проверяем, не является ли это "ответом на старт топика"
+        is_phantom_reply = False
+        if message.is_topic_message and message.message_thread_id:
+            if message.reply_to_message.message_id == message.message_thread_id:
+                is_phantom_reply = True
+        
+        if not is_phantom_reply:
+            target_user = await UserCRUD.get_or_create(
+                session,
+                telegram_id=message.reply_to_message.from_user.id,
+                username=message.reply_to_message.from_user.username or "",
+                full_name=message.reply_to_message.from_user.full_name
+            )
+        else:
+            # Если это фантомный реплай и нет аргументов -> Ошибка
+            await message.answer("Некорректный запрос. Введите ID или @username.")
+            return
+    
+    # 3. НЕТ ДАННЫХ
+    else:
+        await message.answer("Некорректный запрос. Введите ID или @username.")
+        return
+
+    if not target_user or not target_user.telegram_id:
+        # На всякий случай, если что-то пошло не так
+        await message.answer("Ошибка: Не удалось определить пользователя.")
+        return
+
+    in_channel = await UserChannelCRUD.in_user_in_channel(session, target_user.id, channel.id)
+    if in_channel:
+        await message.answer(f"{target_user.full_name} (ID: {target_user.telegram_id}) уже в канале.")
+    else:
+        await UserChannelCRUD.add_user_to_channel(session, target_user.id, channel.id)
+        await message.answer(f"Пользователь добавлен: {target_user.full_name}")
+
+
+@router.message(Command("add_users"))
+async def cmd_add_users(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+    if not channel:
+        await message.answer("Канал не настроен. Сначала используйте /add_ch")
+        return
+
+    if not command.args:
+        await message.answer("Формат: `/add_users @user1 @user2 @user3`")
+        return
+
+    # Универсальный парсинг: пробелы, запятые и точки с запятой
+    processed_args = command.args.replace(",", " ").replace(";", " ")
+    entries = [e.replace("@", "").strip() for e in processed_args.split() if e.strip()]
+
+    added_names = []
+    already_in_count = 0
+    not_found = []
+
+    for entry in entries:
+        u = None
+        if entry.isdigit():
+            u = await UserCRUD.get_by_telegram_id(session, int(entry))
+        else:
+            # Поиск по юзернейму в базе
+            res = await session.execute(select(User).where(User.username.ilike(entry)))
+            u = res.scalar_one_or_none()
+
+        if u:
+            if not await UserChannelCRUD.in_user_in_channel(session, u.id, channel.id):
+                await UserChannelCRUD.add_user_to_channel(session, u.id, channel.id)
+                name = f"@{u.username}" if u.username else u.full_name
+                added_names.append(name)
+            else:
+                already_in_count += 1
+        else:
+            not_found.append(entry)
+
+    # Формируем ответ
+    response = []
+    if added_names:
+        response.append(f"<b>Добавлены:</b>\n" + ", ".join(added_names))
+    else:
+        response.append("Новых пользователей не добавлено.")
+
+    if already_in_count:
+        response.append(f"ℹПропущено (уже в списке): {already_in_count}")
+
+    if not_found:
+        response.append(f"<b>Не найдены в базе:</b>\n" + ", ".join(not_found))
+
+    await message.answer("\n\n".join(response))
+
+@router.message(Command("rm_user"))
+async def cmd_rm_user(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+    
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+    if not channel: 
+        await message.answer("Канал не найден.")
+        return
+
+    target_user = None
+    args = command.args
+
+    # 1. АРГУМЕНТЫ
+    if args:
+        val = args.replace("@", "").strip()
+        if not val:
+            await message.answer("⚠Некорректный запрос. Введите ID или @username.")
+            return
+
+        if val.isdigit():
+            target_user = await UserCRUD.get_by_telegram_id(session, int(val))
+        else:
+            res = await session.execute(select(User).where(User.username.ilike(val)))
+            target_user = res.scalar_one_or_none()
+            
+    # 2. REPLY
+    elif message.reply_to_message:
+        # Проверяем на фантомный реплай
+        is_phantom_reply = False
+        if message.is_topic_message and message.message_thread_id:
+            if message.reply_to_message.message_id == message.message_thread_id:
+                is_phantom_reply = True
+        
+        if not is_phantom_reply:
+            target_user = await UserCRUD.get_by_telegram_id(session, message.reply_to_message.from_user.id)
+        else:
+            await message.answer("⚠Некорректный запрос. Введите ID или @username.")
+            return
+    
+    else:
+        await message.answer("⚠Некорректный запрос. Введите ID или @username.")
+        return
+
+    if target_user:
+        removed = await UserChannelCRUD.remove_user_from_channel(session, target_user.id, channel.id)
+        if removed:
+            await message.answer(f"Удален: {target_user.full_name}")
+        else:
+            await message.answer(f"⚠Пользователь {target_user.full_name} не был в этом канале.")
+    else:
+        await message.answer("Пользователь не найден в базе.")
+
+
+@router.message(Command("rm_users"))
+async def cmd_rm_users(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("Канал не найден.")
+        return
+
+    if not command.args:
+        await message.answer("Формат: `/rm_users @user1 @user2`")
+        return
+
+    processed_args = command.args.replace(",", " ").replace(";", " ")
+    entries = [e.replace("@", "").strip() for e in processed_args.split() if e.strip()]
+
+    removed_names = []
+    not_found = []
+
+    for entry in entries:
+        u = None
+        if entry.isdigit():
+            u = await UserCRUD.get_by_telegram_id(session, int(entry))
+        else:
+            res = await session.execute(select(User).where(User.username.ilike(entry)))
+            u = res.scalar_one_or_none()
+
+        if u:
+            if await UserChannelCRUD.remove_user_from_channel(session, u.id, channel.id):
+                name = f"@{u.username}" if u.username else u.full_name
+                removed_names.append(name)
+            else:
+                not_found.append(f"@{u.username}" if u.username else u.full_name)
+        else:
+            not_found.append(entry)
+
+    # Формируем ответ
+    response = []
+    if removed_names:
+        response.append(f"<b>Удалены из канала:</b>\n" + ", ".join(removed_names))
+    else:
+        response.append("Никто не был удален.")
+
+    if not_found:
+        response.append(f"<b>Не найдены (или не были в канале):</b>\n" + ", ".join(not_found))
+
+    await message.answer("\n\n".join(response))
+
+# --- Управление Каналами и Событиями ---
+
+@router.message(Command("add_ch"))
+async def cmd_add_channel(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+    if message.chat.type == "private": return
+
+    # Проверка аргументов (их должно быть минимум 4)
+    args = command.args.split() if command.args else []
+    if len(args) < 4:
+        await message.answer(
+            "<b>Инструкция по созданию:</b>\n"
+            "<code>add_ch [название репорта] [ключ (или ключевое слово)] [время (дедлайн)] [колво фото]</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_ch Уборка чисто 21:00 2</code>"
+        )
+        return
+
+    # Извлечение данных
+    title = args[0]
+    keyword = args[1]
+    time_str = args[2]
+    try:
+        min_photos = int(args[3])
+        h, m = map(int, time_str.split(':'))
+        deadline = time(h, m)
+    except Exception:
+        await message.answer("Ошибка формата! Время должно быть ЧЧ:ММ, а фото — числом.")
+        return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+
+    # Проверка на существование активного канала
+    existing = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+    if existing:
+        await message.answer(
+            f"<b>Ошибка:</b> в данном чате уже зарегистрирован активный канал '{existing.title}' "
+            "и вы не можете тут что-либо добавить."
+        )
+        return
+
+    # Создание канала с полной настройкой
+    await ChannelCRUD.create(
+        session,
+        telegram_id=message.chat.id,
+        thread_id=thread_id,
+        title=title,
+        report_type=title,  # Тип репорта совпадает с именем канала
+        keyword=keyword,
+        deadline_time=deadline,
+        min_photos=min_photos
+    )
+    await message.answer(f"Канал <b>'{title}'</b> успешно создан и настроен!")
+
+@router.message(Command("rm_ch"))
+async def cmd_rm_channel(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+
+    if not command.args:
+        await message.answer("<b>Инструкция:</b>\nИспользуйте: <code>/rm_ch [название канала]</code>")
+        return
+
+    # Очищаем ввод от лишних пробелов по краям
+    target_title = command.args.strip()
+    thread_id = message.message_thread_id if message.is_topic_message else None
+
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("В этом чате/ветке нет активных каналов.")
+        return
+
+    # Сравниваем названия без учета регистра и лишних пробелов
+    if channel.title.strip().lower() != target_title.lower():
+        await message.answer(
+            f"Название '<code>{target_title}</code>' не совпадает.\n"
+            f"Текущий канал называется: '<code>{channel.title}</code>'\n"
+            f"<i>(Скопируйте название целиком)</i>"
+        )
+        return
+
+    success = await ChannelCRUD.delete_channel(session, channel.id)
+    if success:
+        await message.answer(f"Канал <b>'{channel.title}'</b> успешно удален.\nТеперь вы можете создать новый.")
+
+@router.message(Command("add_event"))
+async def cmd_add_event(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+
+    # 1. Если аргументов нет — выводим помощь
+    if not command.args:
+        await message.answer(
+            "<b>Помощник по команде /add_event:</b>\n\n"
+            "Используйте формат:\n"
+            "<code>/add_event [тип] [ключ], [дата] [время] [мин_фото]</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_event Уборка чисто, 14.07 23:10 2</code>\n\n"
+            "<i>Вы можете прикрепить фото к этой команде, чтобы оно стало шаблоном.</i>"
+        )
+        return
+
+    # 2. Парсинг строки (делим по запятой)
+    try:
+        if "," not in command.args:
+            raise ValueError("Missing comma")
+
+        head, tail = command.args.split(",", 1)
+        head_parts = head.split()  # тип, ключевое_слово
+        tail_parts = tail.split()  # дата, время, мин_фото
+
+        if len(head_parts) < 2:
+            await message.answer("Укажите тип и ключевое слово перед запятой.")
+            return
+
+        r_type = head_parts[0].strip()
+        keyword = head_parts[1].strip()
+
+        if len(tail_parts) < 2:
+            await message.answer("Укажите дату и время после запятой (например: 14.07 23:10).")
+            return
+
+        date_str = tail_parts[0]  # Пока просто парсим, но в БД пишем время
+        time_str = tail_parts[1]
+
+        # 3. Проверка на минимальное количество фото
+        if len(tail_parts) < 3:
+            await message.answer("Вы забыли указать мин. допустимое кол-во фото.")
+            return
+
+        min_photos = int(tail_parts[2])
+
+        # Парсинг времени ЧЧ:ММ
+        h, m = map(int, time_str.split(':'))
+        deadline = time(h, m)
+
+    except ValueError:
+        await message.answer("Ошибка формата! Пример: <code>Уборка чисто, 14.07 23:10 2</code>")
+        return
+    except Exception as e:
+        await message.answer(f" Ошибка: {str(e)}")
+        return
+
+    # 4. Обновление канала в базе
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("Канал не найден. Сначала используйте /add_ch")
+        return
+
+    await ChannelCRUD.update_event(session, channel.id, r_type, keyword, deadline, min_photos)
+
+    # 5. Обработка фото (если оно прикреплено)
+    photo_msg = ""
+    if message.photo:
+        # Берем фото в самом высоком качестве
+        file_id = message.photo[-1].file_id
+        file = await message.bot.get_file(file_id)
+        photo_bytes = await message.bot.download_file(file.file_path)
+
+        await PhotoTemplateCRUD.add_template(
+            session,
+            channel.id,
+            file_id,
+            photo_bytes.read(),
+            f"Шаблон для {r_type}"
+        )
+        photo_msg = "\nФото прикреплено и сохранено как шаблон."
+
+    await message.answer(f"Событие успешно создано!{photo_msg}")
+
+
+@router.message(Command("rm_event"))
+async def cmd_rm_event(message: Message, session: AsyncSession):
+    """Сбрасывает настройки события для текущего канала"""
+    if not is_admin(message.from_user.id): return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("В этом чате/ветке нет активного канала.")
+        return
+
+    # Сбрасываем параметры события к значениям по умолчанию
+    await ChannelCRUD.update_event(
+        session,
+        channel.id,
+        report_type="Не настроено",
+        keyword="",
+        deadline_time=time(0, 0),
+        min_photos=1
+    )
+    await message.answer(f"Настройки события для канала <b>'{channel.title}'</b> успешно сброшены.")
+
+@router.message(Command("list_channels"))
+async def cmd_list_channels(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
+
+    channels = await ChannelCRUD.get_all_active(session)  #
+    if not channels:
+        await message.answer("Список активных каналов пуст.")
+        return
+
+    text = "<b>Список активных каналов:</b>\n\n"
+    for ch in channels:
+        thread_info = f" (Ветка ID: {ch.thread_id})" if ch.thread_id else " (Основной чат)"
+        text += f"• <b>{ch.title}</b>{thread_info}\n"
+        text += f"  └ Ключ: <code>{ch.keyword or 'не задан'}</code> | Тип: {ch.report_type}\n"
+
+    await message.answer(text)
+
+
+@router.message(Command("list_users"))
+async def cmd_list_users(message: Message, session: AsyncSession):
+    """Выводит список пользователей, привязанных к текущему каналу/ветке"""
+    if not is_admin(message.from_user.id): return
+
+    # Определяем контекст (чат и ветка)
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("Этот чат или ветка еще не настроены как канал. Используйте <code>/add_ch</code>")
+        return
+
+    # Получаем список пользователей из БД через UserChannelCRUD
+    users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+
+    if not users:
+        await message.answer(f"В канале <b>{channel.title}</b> пока нет отслеживаемых пользователей.")
+        return
+
+    text = f"<b>Отслеживаемые пользователи ({channel.title}):</b>\n\n"
+    for i, user in enumerate(users, 1):
+        username = f"@{user.username}" if user.username else "<i>(без username)</i>"
+        text += f"{i}. {user.full_name} — {username} (ID: <code>{user.telegram_id}</code>)\n"
+
+    await message.answer(text)
+
+@router.message(Command("get_user_id"))
+async def cmd_get_user_id(message: Message, command: CommandObject, session: AsyncSession):
+    """
+    Узнать ID.
+    Приоритет:
+    1. Аргумент (command.args)
+    2. Reply (реальный, а не фантомный ответ темы)
+    3. Свой ID
+    """
+    
+    # 1. ПРИОРИТЕТ: АРГУМЕНТЫ
+    if command.args:
+        val = command.args.replace("@", "").strip()
+        
+        if not val:
+            await message.answer("Вы ввели пустой username.")
+            return
+
+        u_db = None
+        if val.isdigit():
+            u_db = await UserCRUD.get_by_telegram_id(session, int(val))
+        else:
+            res = await session.execute(select(User).where(User.username.ilike(val)))
+            u_db = res.scalar_one_or_none()
+        
+        if u_db:
+            await message.answer(
+                f"🗃 <b>Пользователь (из базы):</b>\n"
+                f"ID: <code>{u_db.telegram_id}</code>\n"
+                f"Имя: {u_db.full_name}\n"
+                f"Username: @{u_db.username}"
+            )
+        else:
+            await message.answer(f"Пользователь '{val}' не найден в базе данных бота.\nПусть нажмет /start.")
+        return
+
+    # 2. ПРИОРИТЕТ: REPLY (с проверкой на фантомный ответ темы)
+    reply_valid = False
+    
+    if message.reply_to_message:
+        reply_valid = True
+        # Проверяем, не является ли это "ответом на старт топика" (обычное поведение в форумах)
+        if message.is_topic_message and message.message_thread_id:
+            if message.reply_to_message.message_id == message.message_thread_id:
+                reply_valid = False  # Это просто привязка к теме, игнорируем как реплай
+    
+    if reply_valid:
+        u_reply = message.reply_to_message.from_user
+        
+        # Сохраняем в базу (как в add_user)
+        user = await UserCRUD.get_or_create(
+            session,
+            telegram_id=u_reply.id,
+            username=u_reply.username or "",
+            full_name=u_reply.full_name
+        )
+        
+        await message.answer(
+            f"<b>Пользователь (Reply):</b>\n"
+            f"ID: <code>{user.telegram_id}</code>\n"
+            f"Имя: {user.full_name}\n"
+            f"Username: @{user.username}\n"
+            f"<i>(Сохранен в базе)</i>"
+        )
+        return
+
+    # 3. ПРИОРИТЕТ: СВОЙ ID (Если аргументов нет и реплай был фантомным или отсутствовал)
+    u = message.from_user
+    await message.answer(
+        f"<b>Ваш профиль:</b>\n"
+        f"ID: <code>{u.id}</code>\n"
+        f"Имя: {u.full_name}\n"
+        f"Username: @{u.username}"
+    )
+
+
+# --- Шаблоны ---
+
+@router.message(Command("add_template"))
+async def cmd_add_template(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    template_data[message.from_user.id] = {
+        'chat_id': message.chat.id, 'thread_id': thread_id, 'photos': []
+    }
+    await state.set_state(PhotoTemplateStates.waiting_for_photos)
+    await message.answer("Прикрепите фото. В конце напишите /done")
+
+@router.message(PhotoTemplateStates.waiting_for_photos, F.photo)
+async def receive_template_photos(message: Message):
+    data = template_data.get(message.from_user.id)
+    if data:
+        data['photos'].append(message.photo[-1].file_id)
+        await message.answer(f"Фото {len(data['photos'])} принято.")
+
+@router.message(PhotoTemplateStates.waiting_for_photos, Command("done"))
+async def template_photos_done(message: Message, state: FSMContext):
+    data = template_data.get(message.from_user.id)
+    if not data or not data['photos']:
+        await message.answer("Нет фото.")
+        return
+    await state.set_state(PhotoTemplateStates.waiting_for_description)
+    await message.answer("Введите описание шаблона (или /skip)")
+
+@router.message(PhotoTemplateStates.waiting_for_description)
+async def receive_template_desc(message: Message, state: FSMContext, session: AsyncSession):
+    data = template_data.get(message.from_user.id)
+    desc = None if message.text == "/skip" else message.text
+    
+    if data:
+        channel = await ChannelCRUD.get_by_chat_and_thread(session, data['chat_id'], data['thread_id'])
+        if channel:
+            for fid in data['photos']:
+                f = await message.bot.get_file(fid)
+                b = await message.bot.download_file(f.file_path)
+                await PhotoTemplateCRUD.add_template(session, channel.id, fid, b.read(), desc)
+            await message.answer("Шаблоны сохранены.")
+    
+    del template_data[message.from_user.id]
+    await state.clear()
