@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.strategy import FSMStrategy  # Импортируем стратегию
 
 from bot.config import settings
 from bot.database.engine import init_db
@@ -19,19 +20,17 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    """Главная функция запуска бота"""
-
-
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized")
 
-    # Создание бота и диспетчера
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher()
+
+    # ВАЖНО: Устанавливаем стратегию USER_IN_TOPIC для изоляции состояний по веткам
+    dp = Dispatcher(fsm_strategy=FSMStrategy.USER_IN_TOPIC)
 
     # Регистрация middleware
     dp.message.middleware(DatabaseMiddleware())
@@ -41,18 +40,15 @@ async def main():
     dp.include_router(reports.router)
     dp.include_router(stats.router)
 
-    # Создание и запуск планировщика
+    # Запуск планировщика
     scheduler = ReportScheduler(bot)
     scheduler.start()
 
-    logger.info("🤖 Bot started successfully!")
-    logger.info(f"📊 Stats schedule: Every {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][settings.STATS_DAY]} at {settings.STATS_HOUR:02d}:{settings.STATS_MINUTE:02d}")
+    logger.info("🤖 Bot started successfully with Topic Isolation!")
 
     try:
-        # Запуск бота
         await dp.start_polling(bot)
     finally:
-        # Остановка планировщика при завершении
         scheduler.shutdown()
         await bot.session.close()
         logger.info("Bot stopped")

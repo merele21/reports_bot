@@ -1,9 +1,9 @@
 import logging
 from datetime import time
-from typing import Dict
+from typing import Dict, Optional
 
-from aiogram import Router
-from aiogram.filters import Command, CommandObject
+from aiogram import Router, F
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -17,22 +17,21 @@ from bot.database.models import User
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 # --- FSM States ---
 class EventDeletionStates(StatesGroup):
     waiting_for_event_index = State()
-
-
-# Временное хранилище для удаления (user_id -> {index -> event_id})
-deletion_map: Dict[int, Dict[int, int]] = {}
-
 
 # --- Вспомогательные функции ---
 def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_list
 
-
 # --- Обработчики команд ---
+
+@router.message(Command("cancel"), StateFilter(EventDeletionStates.waiting_for_event_index))
+async def cmd_cancel_deletion(message: Message, state: FSMContext):
+    """Принудительная отмена режима удаления"""
+    await state.clear()
+    await message.answer("Операция отменена.")
 
 @router.message(Command("register"))
 async def cmd_register(message: Message, session: AsyncSession):
@@ -100,7 +99,6 @@ async def cmd_help(message: Message):
 
 
 # --- Управление пользователями ---
-# (Логика пользователей осталась прежней, она совместима)
 
 @router.message(Command("add_user"))
 async def cmd_add_user(message: Message, command: CommandObject, session: AsyncSession):
@@ -329,7 +327,6 @@ async def cmd_add_channel(message: Message, command: CommandObject, session: Asy
         return
 
     args = command.args.strip() if command.args else ""
-    # В новой версии канал - только контейнер, никаких ключей и времени
     if not args or len(args.split()) > 1:
         await message.answer(
             "<b>Инструкция по добавлению канала:</b>\n\n"
@@ -409,7 +406,6 @@ async def cmd_add_event(message: Message, command: CommandObject, session: Async
         )
         return
 
-    # Адаптируем парсинг под новый формат
     args = command.args.split()
     if len(args) < 2:
         await message.answer("Ошибка: укажите ключ и время (пример: kassa 18:00)")
@@ -435,7 +431,6 @@ async def cmd_add_event(message: Message, command: CommandObject, session: Async
         await message.answer("Канал не найден. Сначала используйте /add_channel")
         return
 
-    # Обработка фото (шаблона)
     photo_bytes = None
     file_id = None
     photo_msg = ""
@@ -460,54 +455,60 @@ async def cmd_add_event(message: Message, command: CommandObject, session: Async
 @router.message(Command("rm_event"))
 async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
-        await message.answer("У вас нет прав для выполнения этой команды")
         return
 
     thread_id = message.message_thread_id if message.is_topic_message else None
     channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
 
     if not channel:
-        await message.answer("В этом чате/ветке нет активного канала.")
+        await message.answer("В этой ветке нет активного канала. Создайте его через /add_channel")
         return
 
     events = await EventCRUD.get_active_by_channel(session, channel.id)
     if not events:
-        await message.answer("В этом канале пока нет событий.")
+        await message.answer("В этой ветке пока нет событий.")
         return
 
-    text = "<b>Список событий (отправьте номер для удаления):</b>\n\n"
+    text = "<b>Список событий (пришлите номер для удаления):</b>\n\n"
     idx_map = {}
     for i, event in enumerate(events, 1):
-        idx_map[i] = event.id
+        idx_map[str(i)] = event.id
         text += f"{i}. <b>{event.keyword}</b> — {event.deadline_time.strftime('%H:%M')}\n"
 
-    deletion_map[message.from_user.id] = idx_map
+    # Сохраняем данные в состояние ЭТОЙ ветки
+    await state.update_data(deletion_idx_map=idx_map)
     await state.set_state(EventDeletionStates.waiting_for_event_index)
     await message.answer(text)
 
-
-@router.message(EventDeletionStates.waiting_for_event_index)
+@router.message(EventDeletionStates.waiting_for_event_index, F.text)
 async def process_rm_event_index(message: Message, state: FSMContext, session: AsyncSession):
+    """Обработка цифры. Сработает только в той ветке, где был вызван /rm_event"""
     val = message.text.strip()
-    if not val.isdigit():
-        await message.answer("Пришлите цифру.")
+
+    # Если введена другая команда — игнорируем здесь, чтобы сработал основной хэндлер команды
+    if val.startswith("/"):
+        # Но чтобы состояние не «висело», если введена команда — сбрасываем его
+        await state.clear()
         return
 
-    idx = int(val)
-    user_map = deletion_map.get(message.from_user.id)
-    if not user_map or idx not in user_map:
+    if not val.isdigit():
+        await message.answer("Пришлите цифру номера или /cancel.")
+        return
+
+    data = await state.get_data()
+    user_map = data.get("deletion_idx_map", {})
+
+    if val not in user_map:
         await message.answer("Неверный номер. Попробуйте снова.")
         return
 
-    event_id = user_map[idx]
+    event_id = user_map[val]
     if await EventCRUD.delete(session, event_id):
         await message.answer("Событие успешно удалено.")
     else:
-        await message.answer("Ошибка при удалении события.")
+        await message.answer("Ошибка при удалении из базы.")
 
-    deletion_map.pop(message.from_user.id, None)
     await state.clear()
-
 
 @router.message(Command("list_channels"))
 async def cmd_list_channels(message: Message, session: AsyncSession):
@@ -607,55 +608,48 @@ async def cmd_get_user_id(message: Message, command: CommandObject, session: Asy
 
 @router.message(Command("set_wstat"))
 async def cmd_set_wstat(message: Message, command: CommandObject, session: AsyncSession):
-        """
-        Настройка публикации еженедельной статистики
-        /set_wstat [id group] [id thread] [название статистики]
-        """
-        if not is_admin(message.from_user.id):
-            await message.answer("У вас нет прав для выполнения этой команды")
-            return
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
 
-        if not command.args:
-            await message.answer(
-                "<b>Инструкция:</b>\n"
-                "Используйте: <code>/set_wstat [ID канала] [ID треда (0 если нет)] [Заголовок]</code>\n\n"
-                "<b>Пример:</b>\n"
-                "<code>/set_wstat -100123456789 15 Еженедельный отчет</code>"
-            )
-            return
-
-        parts = command.args.split(maxsplit=2)
-        if len(parts) < 3:
-            await message.answer("Ошибка: укажите ID чата, ID треда и Заголовок.")
-            return
-
-        try:
-            target_chat_id = int(parts[0])
-            target_thread_id = int(parts[1])
-            # Если 0, считаем что треда нет (None)
-            if target_thread_id == 0:
-                target_thread_id = None
-
-            custom_title = parts[2]
-        except ValueError:
-            await message.answer("ID чата и треда должны быть числами.")
-            return
-
-        # Определяем текущий канал (контекст, откуда вызвана команда)
-        thread_id = message.message_thread_id if message.is_topic_message else None
-        channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
-
-        if not channel:
-            await message.answer("В этом чате/ветке нет активного канала. Сначала создайте его через /add_channel")
-            return
-
-        await ChannelCRUD.update_stats_destination(
-            session, channel.id, target_chat_id, target_thread_id, custom_title
-        )
-
-        thread_info = f" (ветка {target_thread_id})" if target_thread_id else ""
+    if not command.args:
         await message.answer(
-            f"Настройки статистики обновлены!\n\n"
-            f"<b>Куда:</b> ID {target_chat_id}{thread_info}\n"
-            f"<b>Заголовок:</b> {custom_title}"
+            "<b>Инструкция:</b>\n"
+            "Используйте: <code>/set_wstat [ID канала] [ID треда (0 если нет)] [Заголовок]</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/set_wstat -100123456789 15 Еженедельный отчет</code>"
         )
+        return
+
+    parts = command.args.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Ошибка: укажите ID чата, ID треда и Заголовок.")
+        return
+
+    try:
+        target_chat_id = int(parts[0])
+        target_thread_id = int(parts[1])
+        if target_thread_id == 0:
+            target_thread_id = None
+        custom_title = parts[2]
+    except ValueError:
+        await message.answer("ID чата и треда должны быть числами.")
+        return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("В этом чате/ветке нет активного канала. Сначала создайте его через /add_channel")
+        return
+
+    await ChannelCRUD.update_stats_destination(
+        session, channel.id, target_chat_id, target_thread_id, custom_title
+    )
+
+    thread_info = f" (ветка {target_thread_id})" if target_thread_id else ""
+    await message.answer(
+        f"Настройки статистики обновлены!\n\n"
+        f"<b>Куда:</b> ID {target_chat_id}{thread_info}\n"
+        f"<b>Заголовок:</b> {custom_title}"
+    )
