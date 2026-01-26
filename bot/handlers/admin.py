@@ -2,13 +2,14 @@ import logging
 from datetime import time
 from typing import Dict, Optional
 
-from aiogram import Router, F
+from aiogram import Router, F, html
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from bot.config import settings
 from bot.database.crud import UserCRUD, ChannelCRUD, UserChannelCRUD, EventCRUD
@@ -17,19 +18,46 @@ from bot.database.models import User
 router = Router()
 logger = logging.getLogger(__name__)
 
-# --- FSM States ---
+
+# --- Группы состояний ---
 class EventDeletionStates(StatesGroup):
     waiting_for_event_index = State()
+
+
+class EventCreationStates(StatesGroup):
+    waiting_for_users = State()
+
 
 # --- Вспомогательные функции ---
 def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_list
 
-# --- Обработчики команд ---
 
-@router.message(Command("cancel"), StateFilter(EventDeletionStates.waiting_for_event_index))
-async def cmd_cancel_deletion(message: Message, state: FSMContext):
-    """Принудительная отмена режима удаления"""
+async def finish_event_creation(message: Message, state: FSMContext, session: AsyncSession, data: dict):
+    keyword = data.get("event_keyword")
+    deadline_str = data.get("event_deadline")
+    channel_id = data.get("current_channel_id")
+
+    # 1. Сообщение о создании
+    await message.answer(f"Событие <b>{html.quote(keyword)}</b> успешно создано")
+
+    # 2. Карточка отчета для пользователей
+    users = await UserChannelCRUD.get_users_by_channel(session, channel_id)
+    user_list = []
+    for i, u in enumerate(users, 1):
+        name = html.quote(f"@{u.username}" if u.username else u.full_name)
+        user_list.append(f"{i}. {name}")
+
+    users_text = "\n".join(user_list) if user_list else "<i>Список пуст</i>"
+
+    await message.answer(f"Событие <b>{html.quote(keyword)}</b> успешно создано")
+    await state.clear()
+
+
+# --- Обработчики ---
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.")
 
@@ -66,12 +94,11 @@ async def cmd_register(message: Message, session: AsyncSession):
     else:
         bot_info = await message.bot.get_me()
         bot_link = f"https://t.me/{bot_info.username}"
-        channel_link = "https://t.me/asdasgoret/1098"
 
         await message.answer(
             f"<b>Команда /register здесь недоступна.</b>\n\n"
             f"Пожалуйста, пройдите регистрацию в <a href='{bot_link}'><b>личных сообщениях</b></a> бота "
-            f"или перейдите в ветку <a href='{channel_link}'><b>Регистрация</b></a>.",
+            f"или перейдите в ветку <b>Регистрация</b>.",
             disable_web_page_preview=True
         )
 
@@ -79,20 +106,20 @@ async def cmd_register(message: Message, session: AsyncSession):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     user_id = message.from_user.id
-    help_text = "<b>Команды:</b>\n\n"
+    help_text = "<b>Команды для пользователей:</b>\n\n"
     help_text += "• /register - Регистрация/Обновление профиля\n"
     help_text += "• /get_user_id - Узнать ID (свой/reply/username)\n"
 
     if is_admin(user_id):
-        help_text += "\n<b>Администрирование:</b>\n"
-        help_text += "• /add_channel - Создать канал (папку для событий)\n"
+        help_text += "\n<b>Команды для администраторов:</b>\n"
+        help_text += "• /add_channel - Создать канал\n"
         help_text += "• /rm_channel - Удалить канал\n"
         help_text += "• /add_event - Добавить событие (отчет)\n"
         help_text += "• /rm_event - Удалить событие\n"
         help_text += "• /add_user - Добавить участника\n"
-        help_text += "• /add_users - Массовое добавление\n"
+        help_text += "• /add_users - Добавить несколько участников сразу\n"
         help_text += "• /rm_user - Удалить участника\n"
-        help_text += "• /rm_users - Массовое удаление\n"
+        help_text += "• /rm_users - Удалить несколько участников сразу\n"
         help_text += "• /list_channels - Список каналов\n"
 
     await message.answer(help_text)
@@ -390,67 +417,92 @@ async def cmd_rm_channel(message: Message, command: CommandObject, session: Asyn
 
 
 @router.message(Command("add_event"))
-async def cmd_add_event(message: Message, command: CommandObject, session: AsyncSession):
-    if not is_admin(message.from_user.id):
-        await message.answer("У вас нет прав для выполнения этой команды")
-        return
+async def cmd_add_event(message: Message, command: CommandObject, state: FSMContext, session: AsyncSession):
+    if not is_admin(message.from_user.id): return
 
-    if not command.args:
-        await message.answer(
-            "<b>Помощник по команде /add_event:</b>\n\n"
-            "Используйте формат:\n"
-            "<code>/add_event [ключ] [время] [мин_фото]</code>\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/add_event касса 18:00 1</code>\n\n"
-            "<i>Прикрепите фото к команде, чтобы оно стало шаблоном.</i>"
-        )
-        return
-
-    args = command.args.split()
+    args = command.args.split() if command.args else []
     if len(args) < 2:
-        await message.answer("Ошибка: укажите ключ и время (пример: kassa 18:00)")
+        await message.answer("Используйте: <code>/add_event [ключ] [время] [мин_фото]</code>")
         return
 
-    keyword = args[0]
-    time_str = args[1]
-    min_photos = 1
-    if len(args) >= 3 and args[2].isdigit():
-        min_photos = int(args[2])
+    keyword, time_str = args[0], args[1]
+    min_photos = int(args[2]) if len(args) >= 3 and args[2].isdigit() else 1
 
     try:
         h, m = map(int, time_str.split(':'))
         deadline = time(h, m)
     except:
-        await message.answer("Ошибка формата времени! Используйте ЧЧ:ММ (например, 18:00).")
+        await message.answer("Ошибка формата времени! Используйте ЧЧ:ММ.")
         return
 
     thread_id = message.message_thread_id if message.is_topic_message else None
     channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
-
     if not channel:
-        await message.answer("Канал не найден. Сначала используйте /add_channel")
+        await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
         return
 
-    photo_bytes = None
-    file_id = None
-    photo_msg = ""
+    photo_bytes, file_id = None, None
     if message.photo:
         file_id = message.photo[-1].file_id
         file = await message.bot.get_file(file_id)
         photo_file = await message.bot.download_file(file.file_path)
         photo_bytes = photo_file.read()
-        photo_msg = "\nФото прикреплено и сохранено как шаблон."
 
     try:
-        await EventCRUD.create(
-            session, channel.id, keyword, deadline,
-            min_photos=min_photos,
-            photo_data=photo_bytes, file_id=file_id
-        )
-        await message.answer(f"Событие <b>'{keyword}'</b> успешно создано!{photo_msg}")
-    except Exception as e:
-        await message.answer(f"Ошибка при создании (возможно такой ключ уже есть): {e}")
+        # Создаем событие
+        await EventCRUD.create(session, channel.id, keyword, deadline, min_photos, photo_bytes, file_id)
 
+        # Получаем список тех, кто уже в канале для отображения
+        current_users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        users_names = [html.quote(f"@{u.username}" if u.username else u.full_name) for u in current_users]
+        users_str = ", ".join(users_names) if users_names else "нет"
+
+        await state.update_data(
+            current_channel_id=channel.id,
+            event_keyword=keyword,
+            event_deadline=deadline.strftime('%H:%M')
+        )
+        await state.set_state(EventCreationStates.waiting_for_users)
+
+        await message.answer(
+            f"Событие настроено. Теперь добавьте отслеживаемых пользователей (отправьте список @username или ID через пробел).\n\n"
+            f"Или введите /skip\n"
+            f"Пользователи которые отслеживаются сейчас: [{users_str}]"
+        )
+    except IntegrityError:
+        await message.answer("Ошибка: такой ключ уже существует в этом канале.")
+    except Exception as e:
+        logger.error(f"Error in add_event: {e}")
+        await message.answer("Произошла ошибка при сохранении события.")
+
+
+@router.message(EventCreationStates.waiting_for_users, Command("skip"))
+async def skip_event_users(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    await finish_event_creation(message, state, session, data)
+
+
+@router.message(EventCreationStates.waiting_for_users, F.text)
+async def process_event_users(message: Message, state: FSMContext, session: AsyncSession):
+    if message.text.startswith("/"): return
+
+    data = await state.get_data()
+    channel_id = data.get("current_channel_id")
+
+    entries = [e.replace("@", "").strip() for e in message.text.replace(",", " ").replace(";", " ").split() if
+               e.strip()]
+    for entry in entries:
+        u = None
+        if entry.isdigit():
+            u = await UserCRUD.get_by_telegram_id(session, int(entry))
+        else:
+            res = await session.execute(select(User).where(User.username.ilike(entry)))
+            u = res.scalar_one_or_none()
+
+        if u and not await UserChannelCRUD.in_user_in_channel(session, u.id, channel_id):
+            await UserChannelCRUD.add_user_to_channel(session, u.id, channel_id)
+
+    await finish_event_creation(message, state, session, data)
 
 @router.message(Command("rm_event"))
 async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSession):
@@ -531,26 +583,17 @@ async def cmd_list_channels(message: Message, session: AsyncSession):
 
 @router.message(Command("list_users"))
 async def cmd_list_users(message: Message, session: AsyncSession):
-    if not is_admin(message.from_user.id):
-        await message.answer("У вас нет прав для выполнения этой команды")
-        return
-
+    if not is_admin(message.from_user.id): return
     thread_id = message.message_thread_id if message.is_topic_message else None
     channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
     if not channel:
-        await message.answer("Этот чат или ветка еще не настроены как канал. Используйте <code>/add_channel</code>")
+        await message.answer("Канал не настроен.")
         return
-
     users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
-    if not users:
-        await message.answer(f"В канале <b>{channel.title}</b> пока нет отслеживаемых пользователей.")
-        return
-
-    text = f"<b>Отслеживаемые пользователи ({channel.title}):</b>\n\n"
+    text = f"<b>Отслеживаемые пользователи ({html.quote(channel.title)}):</b>\n\n"
     for i, user in enumerate(users, 1):
-        username = f"@{user.username}" if user.username else "<i>(без username)</i>"
-        text += f"{i}. {user.full_name} — {username} (ID: <code>{user.telegram_id}</code>)\n"
-
+        username = html.quote(f"@{user.username}") if user.username else "<i>(без username)</i>"
+        text += f"{i}. {html.quote(user.full_name)} — {username} (ID: <code>{user.telegram_id}</code>)\n"
     await message.answer(text)
 
 
@@ -653,3 +696,19 @@ async def cmd_set_wstat(message: Message, command: CommandObject, session: Async
         f"<b>Куда:</b> ID {target_chat_id}{thread_info}\n"
         f"<b>Заголовок:</b> {custom_title}"
     )
+
+@router.message(Command("get_thread_id"))
+async def cmd_get_thread_id(message: Message):
+    """Показывает ID текущего чата и ветки (thread)"""
+    if not is_admin(message.from_user.id):
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id if message.is_topic_message else "Основной чат (0)"
+
+    response = (
+        f"<b>Данные для настройки статистики:</b>\n\n"
+        f"ID группы: <code>{chat_id}</code>\n"
+        f"ID ветки (thread_id): <code>{thread_id}</code>\n\n"
+        )
+    await message.answer(response)
