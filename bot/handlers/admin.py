@@ -33,26 +33,6 @@ def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_list
 
 
-async def finish_event_creation(message: Message, state: FSMContext, session: AsyncSession, data: dict):
-    keyword = data.get("event_keyword")
-    deadline_str = data.get("event_deadline")
-    channel_id = data.get("current_channel_id")
-
-    # 1. Сообщение о создании
-    await message.answer(f"Событие <b>{html.quote(keyword)}</b> успешно создано")
-
-    # 2. Карточка отчета для пользователей
-    users = await UserChannelCRUD.get_users_by_channel(session, channel_id)
-    user_list = []
-    for i, u in enumerate(users, 1):
-        name = html.quote(f"@{u.username}" if u.username else u.full_name)
-        user_list.append(f"{i}. {name}")
-
-    users_text = "\n".join(user_list) if user_list else "<i>Список пуст</i>"
-
-    await message.answer(f"Событие <b>{html.quote(keyword)}</b> успешно создано")
-    await state.clear()
-
 
 # --- Обработчики ---
 
@@ -121,6 +101,10 @@ async def cmd_help(message: Message):
         help_text += "• /rm_user - Удалить участника\n"
         help_text += "• /rm_users - Удалить несколько участников сразу\n"
         help_text += "• /list_channels - Список каналов\n"
+        help_text += "• /list_users - Отслеживаемые пользователи \n"
+        help_text += "• /get_thread_id - Узнать ID текущей ветки \n"
+        help_text += "• /set_wstat - Настройка еженедельной статистики \n"
+
 
     await message.answer(help_text)
 
@@ -417,8 +401,10 @@ async def cmd_rm_channel(message: Message, command: CommandObject, session: Asyn
 
 
 @router.message(Command("add_event"))
-async def cmd_add_event(message: Message, command: CommandObject, state: FSMContext, session: AsyncSession):
-    if not is_admin(message.from_user.id): return
+async def cmd_add_event(message: Message, command: CommandObject, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
 
     args = command.args.split() if command.args else []
     if len(args) < 2:
@@ -452,22 +438,11 @@ async def cmd_add_event(message: Message, command: CommandObject, state: FSMCont
         # Создаем событие
         await EventCRUD.create(session, channel.id, keyword, deadline, min_photos, photo_bytes, file_id)
 
-        # Получаем список тех, кто уже в канале для отображения
-        current_users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
-        users_names = [html.quote(f"@{u.username}" if u.username else u.full_name) for u in current_users]
-        users_str = ", ".join(users_names) if users_names else "нет"
-
-        await state.update_data(
-            current_channel_id=channel.id,
-            event_keyword=keyword,
-            event_deadline=deadline.strftime('%H:%M')
-        )
-        await state.set_state(EventCreationStates.waiting_for_users)
-
         await message.answer(
-            f"Событие настроено. Теперь добавьте отслеживаемых пользователей (отправьте список @username или ID через пробел).\n\n"
-            f"Или введите /skip\n"
-            f"Пользователи которые отслеживаются сейчас: [{users_str}]"
+            f"Событие <b>{html.quote(keyword)}</b> успешно создано.\n"
+            f"Дальнейшие шаги: \n"
+            f"Добавьте отслеживаемых пользователей через <code>/add_users</code> \n"
+            f"Проверить кто отслеживается можно через <code>/list_users</code>."
         )
     except IntegrityError:
         await message.answer("Ошибка: такой ключ уже существует в этом канале.")
@@ -476,37 +451,10 @@ async def cmd_add_event(message: Message, command: CommandObject, state: FSMCont
         await message.answer("Произошла ошибка при сохранении события.")
 
 
-@router.message(EventCreationStates.waiting_for_users, Command("skip"))
-async def skip_event_users(message: Message, state: FSMContext, session: AsyncSession):
-    data = await state.get_data()
-    await finish_event_creation(message, state, session, data)
-
-
-@router.message(EventCreationStates.waiting_for_users, F.text)
-async def process_event_users(message: Message, state: FSMContext, session: AsyncSession):
-    if message.text.startswith("/"): return
-
-    data = await state.get_data()
-    channel_id = data.get("current_channel_id")
-
-    entries = [e.replace("@", "").strip() for e in message.text.replace(",", " ").replace(";", " ").split() if
-               e.strip()]
-    for entry in entries:
-        u = None
-        if entry.isdigit():
-            u = await UserCRUD.get_by_telegram_id(session, int(entry))
-        else:
-            res = await session.execute(select(User).where(User.username.ilike(entry)))
-            u = res.scalar_one_or_none()
-
-        if u and not await UserChannelCRUD.in_user_in_channel(session, u.id, channel_id):
-            await UserChannelCRUD.add_user_to_channel(session, u.id, channel_id)
-
-    await finish_event_creation(message, state, session, data)
-
 @router.message(Command("rm_event"))
 async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
         return
 
     thread_id = message.message_thread_id if message.is_topic_message else None
@@ -583,12 +531,16 @@ async def cmd_list_channels(message: Message, session: AsyncSession):
 
 @router.message(Command("list_users"))
 async def cmd_list_users(message: Message, session: AsyncSession):
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
     thread_id = message.message_thread_id if message.is_topic_message else None
     channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
     if not channel:
         await message.answer("Канал не настроен.")
         return
+
     users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
     text = f"<b>Отслеживаемые пользователи ({html.quote(channel.title)}):</b>\n\n"
     for i, user in enumerate(users, 1):
@@ -701,6 +653,7 @@ async def cmd_set_wstat(message: Message, command: CommandObject, session: Async
 async def cmd_get_thread_id(message: Message):
     """Показывает ID текущего чата и ветки (thread)"""
     if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
         return
 
     chat_id = message.chat.id
