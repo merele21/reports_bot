@@ -17,7 +17,6 @@ class Settings(BaseSettings):
     STATS_DAY: int
     STATS_HOUR: int
     STATS_MINUTE: int
-    DEADLINE_WARNING_MINUTES: int # За сколько минут ДО дедлайна отправлять предупреждение
 
     class Config:
         env_file = ".env"
@@ -43,10 +42,10 @@ class Settings(BaseSettings):
         current_admins = self.admin_list
         if user_id in current_admins:
             return False
-
+        
         current_admins.append(user_id)
         self.ADMIN_IDS = ','.join(map(str, current_admins))
-
+        
         # Сохраняем в .env
         self._save_to_env()
         return True
@@ -56,10 +55,10 @@ class Settings(BaseSettings):
         current_admins = self.admin_list
         if user_id not in current_admins:
             return False
-
+        
         current_admins.remove(user_id)
         self.ADMIN_IDS = ','.join(map(str, current_admins))
-
+        
         self._save_to_env()
         return True
 
@@ -68,10 +67,10 @@ class Settings(BaseSettings):
         env_path = Path(".env")
         if not env_path.exists():
             return
-
+        
         with open(env_path, 'r') as f:
             lines = f.readlines()
-
+        
         with open(env_path, 'w') as f:
             for line in lines:
                 if line.startswith('ADMIN_IDS='):

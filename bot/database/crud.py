@@ -1,12 +1,73 @@
 import hashlib
 import io
+import json
+import re
 from datetime import date, time
 from sqlite3 import IntegrityError
 from typing import Optional, List
 
-from bot.database.models import User, Channel, Event, Report, Stats, UserChannel
-from sqlalchemy import select, func, and_, desc
+from bot.database.models import (
+    User, Channel, Event, TempEvent, CheckoutEvent,
+    Report, Stats, UserChannel, CheckoutSubmission, CheckoutReport
+)
+from sqlalchemy import select, func, and_, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Словарь допустимых ключевых слов для checkout событий
+ALLOWED_CHECKOUT_KEYWORDS = [
+    "элитка", "сигареты", "тихое", "водка", "пиво", "игристое",
+    "коктейли", "скоропорт", "сопутка", "вода", "энергетики",
+    "бакалея", "мороженое", "шоколад", "нонфуд", "выходной", "выходная"
+]
+
+
+def normalize_keyword(keyword: str) -> str:
+    """
+    Нормализация ключевого слова:
+    - приведение к нижнему регистру
+    - удаление лишних пробелов
+    """
+    return re.sub(r'\s+', '', keyword.lower().strip())
+
+
+def extract_keywords_from_text(text: str, reference_keyword: str) -> bool:
+    """
+    Проверка наличия ключевого слова в тексте с нормализацией
+
+    Args:
+        text: текст сообщения
+        reference_keyword: эталонное ключевое слово
+
+    Returns:
+        bool: найдено ли ключевое слово
+    """
+    normalized_text = normalize_keyword(text)
+    normalized_reference = normalize_keyword(reference_keyword)
+    return normalized_reference in normalized_text
+
+
+def parse_checkout_keywords(text: str) -> List[str]:
+    """
+    Парсинг ключевых слов из текста для checkout событий
+    Поддерживает разделители: +, /, пробел
+
+    Args:
+        text: текст вида "скоропорт+вино" или "элитка / тихое"
+
+    Returns:
+        список нормализованных ключевых слов
+    """
+    # Разделяем по +, /, пробелу
+    words = re.split(r'[+/\s]+', text.lower().strip())
+
+    # Фильтруем только разрешенные слова
+    result = []
+    for word in words:
+        word_clean = word.strip()
+        if word_clean in ALLOWED_CHECKOUT_KEYWORDS:
+            result.append(word_clean)
+
+    return result
 
 
 class UserCRUD:
@@ -212,6 +273,253 @@ class EventCRUD:
         return False, "Фото не соответствует шаблону"
 
 
+class TempEventCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            channel_id: int,
+            keyword: str,
+            deadline_time: time,
+            event_date: date,
+            min_photos: int = 1,
+            photo_data: bytes = None,
+            file_id: str = None
+    ) -> TempEvent:
+        photo_hash = None
+        perceptual_hash = None
+        if photo_data:
+            photo_hash = hashlib.md5(photo_data).hexdigest()
+            try:
+                from PIL import Image
+                import imagehash
+                img = Image.open(io.BytesIO(photo_data))
+                perceptual_hash = str(imagehash.phash(img))
+            except ImportError:
+                pass
+
+        temp_event = TempEvent(
+            channel_id=channel_id,
+            keyword=keyword,
+            deadline_time=deadline_time,
+            event_date=event_date,
+            min_photos=min_photos,
+            template_file_id=file_id,
+            template_hash=photo_hash,
+            template_phash=perceptual_hash
+        )
+        session.add(temp_event)
+        await session.commit()
+        await session.refresh(temp_event)
+        return temp_event
+
+    @staticmethod
+    async def get_active_by_channel_and_date(
+            session: AsyncSession, channel_id: int, event_date: date
+    ) -> List[TempEvent]:
+        stmt = select(TempEvent).where(
+            TempEvent.channel_id == channel_id,
+            TempEvent.event_date == event_date
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def delete_old_events(session: AsyncSession, before_date: date) -> int:
+        """Удаление временных событий старше указанной даты"""
+        stmt = select(TempEvent).where(TempEvent.event_date < before_date)
+        result = await session.execute(stmt)
+        old_events = result.scalars().all()
+
+        count = len(old_events)
+        for event in old_events:
+            await session.delete(event)
+
+        await session.commit()
+        return count
+
+    @staticmethod
+    async def delete(session: AsyncSession, temp_event_id: int) -> bool:
+        """Удаление конкретного временного события"""
+        stmt = select(TempEvent).where(TempEvent.id == temp_event_id)
+        result = await session.execute(stmt)
+        temp_event = result.scalar_one_or_none()
+        if temp_event:
+            await session.delete(temp_event)
+            await session.commit()
+            return True
+        return False
+
+
+class CheckoutEventCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            channel_id: int,
+            first_keyword: str,
+            first_deadline_time: time,
+            second_keyword: str,
+            second_deadline_time: time,
+            min_photos: int = 1,
+            stats_time: Optional[time] = None
+    ) -> CheckoutEvent:
+        checkout_event = CheckoutEvent(
+            channel_id=channel_id,
+            first_keyword=first_keyword,
+            first_deadline_time=first_deadline_time,
+            second_keyword=second_keyword,
+            second_deadline_time=second_deadline_time,
+            min_photos=min_photos,
+            stats_time=stats_time,  # Новое поле
+            allowed_keywords=json.dumps(ALLOWED_CHECKOUT_KEYWORDS)
+        )
+        session.add(checkout_event)
+        await session.commit()
+        await session.refresh(checkout_event)
+        return checkout_event
+
+    @staticmethod
+    async def get_active_by_channel(session: AsyncSession, channel_id: int) -> List[CheckoutEvent]:
+        stmt = select(CheckoutEvent).where(CheckoutEvent.channel_id == channel_id)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def delete(session: AsyncSession, event_id: int) -> bool:
+        stmt = select(CheckoutEvent).where(CheckoutEvent.id == event_id)
+        result = await session.execute(stmt)
+        event = result.scalar_one_or_none()
+        if event:
+            await session.delete(event)
+            await session.commit()
+            return True
+        return False
+
+
+class CheckoutSubmissionCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            user_id: int,
+            checkout_event_id: int,
+            keywords: List[str],
+            submission_date: date = None
+    ) -> CheckoutSubmission:
+        if submission_date is None:
+            submission_date = date.today()
+
+        submission = CheckoutSubmission(
+            user_id=user_id,
+            checkout_event_id=checkout_event_id,
+            submission_date=submission_date,
+            keywords=json.dumps(keywords)
+        )
+        session.add(submission)
+        await session.commit()
+        await session.refresh(submission)
+        return submission
+
+    @staticmethod
+    async def get_today_submission(
+            session: AsyncSession, user_id: int, checkout_event_id: int
+    ) -> Optional[CheckoutSubmission]:
+        today = date.today()
+        stmt = select(CheckoutSubmission).where(
+            CheckoutSubmission.user_id == user_id,
+            CheckoutSubmission.checkout_event_id == checkout_event_id,
+            CheckoutSubmission.submission_date == today
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_all_today_submissions(
+            session: AsyncSession, checkout_event_id: int
+    ) -> List[CheckoutSubmission]:
+        today = date.today()
+        stmt = select(CheckoutSubmission).where(
+            CheckoutSubmission.checkout_event_id == checkout_event_id,
+            CheckoutSubmission.submission_date == today
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class CheckoutReportCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            user_id: int,
+            checkout_event_id: int,
+            message_id: int,
+            photos_count: int,
+            keywords: List[str],
+            is_complete: bool = False
+    ) -> CheckoutReport:
+        report = CheckoutReport(
+            user_id=user_id,
+            checkout_event_id=checkout_event_id,
+            message_id=message_id,
+            photos_count=photos_count,
+            keywords=json.dumps(keywords),
+            is_complete=is_complete
+        )
+        session.add(report)
+        await session.commit()
+        await session.refresh(report)
+        return report
+
+    @staticmethod
+    async def get_today_reports(
+            session: AsyncSession, user_id: int, checkout_event_id: int
+    ) -> List[CheckoutReport]:
+        today = date.today()
+        stmt = select(CheckoutReport).where(
+            CheckoutReport.user_id == user_id,
+            CheckoutReport.checkout_event_id == checkout_event_id,
+            CheckoutReport.report_date == today
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_all_today_reports(
+            session: AsyncSession, checkout_event_id: int
+    ) -> List[CheckoutReport]:
+        today = date.today()
+        stmt = select(CheckoutReport).where(
+            CheckoutReport.checkout_event_id == checkout_event_id,
+            CheckoutReport.report_date == today
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_remaining_keywords(
+            session: AsyncSession, user_id: int, checkout_event_id: int
+    ) -> List[str]:
+        """Получить оставшиеся не сданные ключевые слова для пользователя"""
+        submission = await CheckoutSubmissionCRUD.get_today_submission(
+            session, user_id, checkout_event_id
+        )
+        if not submission:
+            return []
+
+        submitted_keywords = set(json.loads(submission.keywords))
+
+        # Получаем все уже сданные отчеты
+        reports = await CheckoutReportCRUD.get_today_reports(
+            session, user_id, checkout_event_id
+        )
+
+        reported_keywords = set()
+        for report in reports:
+            reported_keywords.update(json.loads(report.keywords))
+
+        # Возвращаем разницу
+        remaining = submitted_keywords - reported_keywords
+        return list(remaining)
+
+
 class UserChannelCRUD:
     @staticmethod
     async def add_user_to_channel(
@@ -275,10 +583,11 @@ class ReportCRUD:
             session: AsyncSession,
             user_id: int,
             channel_id: int,
-            event_id: int,
-            message_id: int,
-            photos_count: int,
-            message_text: str,
+            event_id: Optional[int] = None,
+            temp_event_id: Optional[int] = None,
+            message_id: int = 0,
+            photos_count: int = 0,
+            message_text: str = "",
             is_valid: bool = True,
             template_validated: bool = False,
     ) -> Report:
@@ -286,6 +595,7 @@ class ReportCRUD:
             user_id=user_id,
             channel_id=channel_id,
             event_id=event_id,
+            temp_event_id=temp_event_id,
             message_id=message_id,
             photos_count=photos_count,
             message_text=message_text,
@@ -299,18 +609,27 @@ class ReportCRUD:
 
     @staticmethod
     async def get_today_report(
-            session: AsyncSession, user_id: int, channel_id: int, event_id: int
+            session: AsyncSession,
+            user_id: int,
+            channel_id: int,
+            event_id: Optional[int] = None,
+            temp_event_id: Optional[int] = None
     ) -> Optional[Report]:
         today = date.today()
-        stmt = select(Report).where(
-            and_(
-                Report.user_id == user_id,
-                Report.channel_id == channel_id,
-                Report.event_id == event_id,
-                Report.report_date == today,
-                Report.is_valid == True,
-            )
-        )
+
+        conditions = [
+            Report.user_id == user_id,
+            Report.channel_id == channel_id,
+            Report.report_date == today,
+            Report.is_valid == True,
+        ]
+
+        if event_id is not None:
+            conditions.append(Report.event_id == event_id)
+        if temp_event_id is not None:
+            conditions.append(Report.temp_event_id == temp_event_id)
+
+        stmt = select(Report).where(and_(*conditions))
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
