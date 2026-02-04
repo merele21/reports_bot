@@ -11,6 +11,11 @@ from bot.database.crud import (
     TempEventCRUD, CheckoutEventCRUD, CheckoutSubmissionCRUD, CheckoutReportCRUD
 )
 from bot.database.engine import async_session_maker
+from bot.utils.user_grouping import (
+    group_users_by_display_name,
+    filter_one_user_per_display_name,
+    format_user_mention
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +56,24 @@ class ReportScheduler:
                             if key in self.warnings_sent_today:
                                 continue
 
+                            # Группируем пользователей по display_name
+                            user_groups = group_users_by_display_name(users)
+                            
                             debtors = []
-                            for u in users:
-                                report = await ReportCRUD.get_today_report(
-                                    session, u.id, ch.id, event_id=ev.id
-                                )
-                                if not report:
-                                    debtors.append(u)
+                            for group_key, group_users in user_groups.items():
+                                # Проверяем, сдал ли ХОТЯ БЫ ОДИН аккаунт из группы
+                                group_has_report = False
+                                for u in group_users:
+                                    report = await ReportCRUD.get_today_report(
+                                        session, u.id, ch.id, event_id=ev.id
+                                    )
+                                    if report:
+                                        group_has_report = True
+                                        break
+                                
+                                # Если НИ ОДИН аккаунт из группы не сдал - добавляем первого представителя
+                                if not group_has_report:
+                                    debtors.append(group_users[0])
 
                             if debtors:
                                 await self.send_warning_message(
@@ -82,13 +98,21 @@ class ReportScheduler:
                             if key in self.warnings_sent_today:
                                 continue
 
+                            user_groups = group_users_by_display_name(users)
+                            
                             debtors = []
-                            for u in users:
-                                report = await ReportCRUD.get_today_report(
-                                    session, u.id, ch.id, temp_event_id=tev.id
-                                )
-                                if not report:
-                                    debtors.append(u)
+                            for group_key, group_users in user_groups.items():
+                                group_has_report = False
+                                for u in group_users:
+                                    report = await ReportCRUD.get_today_report(
+                                        session, u.id, ch.id, temp_event_id=tev.id
+                                    )
+                                    if report:
+                                        group_has_report = True
+                                        break
+                                
+                                if not group_has_report:
+                                    debtors.append(group_users[0])
 
                             if debtors:
                                 await self.send_warning_message(
@@ -108,9 +132,12 @@ class ReportScheduler:
             minutes_left, is_temp=False
     ):
         """Отправка предупреждения о приближении дедлайна"""
+        # Фильтруем должников - оставляем только одного представителя на display_name
+        unique_debtors = filter_one_user_per_display_name(debtors)
+        
         debt_list = [
-            f"{i}. @{u.username}" if u.username else f"{i}. {u.full_name}"
-            for i, u in enumerate(debtors, 1)
+            f"{i}. {format_user_mention(u)}"
+            for i, u in enumerate(unique_debtors, 1)
         ]
 
         event_type = "⏱ Временный отчет" if is_temp else "📋 Отчет"
@@ -152,13 +179,21 @@ class ReportScheduler:
             if first_warning_time <= now < first_warning_time + timedelta(minutes=1):
                 key = (channel.id, 'checkout_first_warning', cev.id, today)
                 if key not in self.warnings_sent_today:
+                    user_groups = group_users_by_display_name(users)
+                    
                     debtors = []
-                    for u in users:
-                        submission = await CheckoutSubmissionCRUD.get_today_submission(
-                            session, u.id, cev.id
-                        )
-                        if not submission:
-                            debtors.append(u)
+                    for group_key, group_users in user_groups.items():
+                        group_has_submission = False
+                        for u in group_users:
+                            submission = await CheckoutSubmissionCRUD.get_today_submission(
+                                session, u.id, cev.id
+                            )
+                            if submission:
+                                group_has_submission = True
+                                break
+                        
+                        if not group_has_submission:
+                            debtors.append(group_users[0])
 
                     if debtors:
                         await self.send_checkout_first_warning(
@@ -176,19 +211,39 @@ class ReportScheduler:
             if second_warning_time <= now < second_warning_time + timedelta(minutes=1):
                 key = (channel.id, 'checkout_second_warning', cev.id, today)
                 if key not in self.warnings_sent_today:
+                    user_groups = group_users_by_display_name(users)
+                    
                     incomplete_users = []
-                    for u in users:
-                        submission = await CheckoutSubmissionCRUD.get_today_submission(
-                            session, u.id, cev.id
-                        )
-                        if not submission:
-                            continue
+                    for group_key, group_users in user_groups.items():
+                        # Проверяем каждый аккаунт в группе
+                        group_incomplete = True
+                        group_remaining = None
+                        representative = None
                         
-                        remaining = await CheckoutReportCRUD.get_remaining_keywords(
-                            session, u.id, cev.id
-                        )
-                        if remaining:
-                            incomplete_users.append((u, remaining))
+                        for u in group_users:
+                            submission = await CheckoutSubmissionCRUD.get_today_submission(
+                                session, u.id, cev.id
+                            )
+                            if not submission:
+                                continue
+                            
+                            remaining = await CheckoutReportCRUD.get_remaining_keywords(
+                                session, u.id, cev.id
+                            )
+                            
+                            # Если хотя бы один аккаунт сдал все - группа полностью выполнила
+                            if not remaining:
+                                group_incomplete = False
+                                break
+                            
+                            # Запоминаем оставшиеся ключи и представителя
+                            if representative is None:
+                                representative = u
+                                group_remaining = remaining
+                        
+                        # Добавляем группу в список только если НИ ОДИН аккаунт не сдал все
+                        if group_incomplete and representative and group_remaining:
+                            incomplete_users.append((representative, group_remaining))
 
                     if incomplete_users:
                         await self.send_checkout_second_warning(
@@ -201,9 +256,11 @@ class ReportScheduler:
             self, debtors, channel, keyword, deadline_time, minutes_left
     ):
         """Предупреждение о первом дедлайне checkout события"""
+        unique_debtors = filter_one_user_per_display_name(debtors)
+        
         debt_list = [
-            f"{i}. @{u.username}" if u.username else f"{i}. {u.full_name}"
-            for i, u in enumerate(debtors, 1)
+            f"{i}. {format_user_mention(u)}"
+            for i, u in enumerate(unique_debtors, 1)
         ]
 
         text = (
@@ -233,9 +290,16 @@ class ReportScheduler:
             self, incomplete_users, channel, keyword, deadline_time, minutes_left
     ):
         """Предупреждение о втором дедлайне checkout события"""
+        # Группируем пользователей по display_name
+        grouped = {}
+        for u, remaining in incomplete_users:
+            key = u.display_name if u.display_name else f"unique_{u.telegram_id}"
+            if key not in grouped:
+                grouped[key] = (u, remaining)  # Берем первого представителя группы
+
         debt_list = []
-        for i, (u, remaining) in enumerate(incomplete_users, 1):
-            username = f"@{u.username}" if u.username else u.full_name
+        for i, (u, remaining) in enumerate(grouped.values(), 1):
+            username = format_user_mention(u)
             remaining_str = ", ".join(remaining)
             debt_list.append(f"{i}. {username} — осталось: {remaining_str}")
 
@@ -291,12 +355,17 @@ class ReportScheduler:
                             if key in self.reminders_sent_today:
                                 continue
 
-                            debtors = [
-                                u for u in users
-                                if not await ReportCRUD.get_today_report(
-                                    session, u.id, ch.id, event_id=ev.id
-                                )
-                            ]
+                            user_groups = group_users_by_display_name(users)
+                            
+                            debtors = []
+                            for group_key, group_users in user_groups.items():
+                                group_has_report = False
+                                for u in group_users:
+                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, event_id=ev.id):
+                                        group_has_report = True
+                                        break
+                                if not group_has_report:
+                                    debtors.append(group_users[0])
 
                             if debtors:
                                 await self.send_group_reminder(
@@ -324,12 +393,17 @@ class ReportScheduler:
                             if key in self.reminders_sent_today:
                                 continue
 
-                            debtors = [
-                                u for u in users
-                                if not await ReportCRUD.get_today_report(
-                                    session, u.id, ch.id, temp_event_id=tev.id
-                                )
-                            ]
+                            user_groups = group_users_by_display_name(users)
+                            
+                            debtors = []
+                            for group_key, group_users in user_groups.items():
+                                group_has_report = False
+                                for u in group_users:
+                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, temp_event_id=tev.id):
+                                        group_has_report = True
+                                        break
+                                if not group_has_report:
+                                    debtors.append(group_users[0])
 
                             if debtors:
                                 await self.send_group_reminder(
@@ -361,13 +435,20 @@ class ReportScheduler:
             if first_reminder_start <= now <= first_reminder_end:
                 key = (channel.id, 'checkout_first', cev.id, today)
                 if key not in self.checkout_reminders_sent:
+                    user_groups = group_users_by_display_name(users)
+                    
                     debtors = []
-                    for u in users:
-                        submission = await CheckoutSubmissionCRUD.get_today_submission(
-                            session, u.id, cev.id
-                        )
-                        if not submission:
-                            debtors.append(u)
+                    for group_key, group_users in user_groups.items():
+                        group_has_submission = False
+                        for u in group_users:
+                            submission = await CheckoutSubmissionCRUD.get_today_submission(
+                                session, u.id, cev.id
+                            )
+                            if submission:
+                                group_has_submission = True
+                                break
+                        if not group_has_submission:
+                            debtors.append(group_users[0])
 
                     if debtors:
                         await self.send_checkout_first_reminder(
@@ -388,13 +469,29 @@ class ReportScheduler:
                 key = (channel.id, 'checkout_second', cev.id, today)
                 if key not in self.checkout_reminders_sent:
                     # Находим тех, кто не сдал все фотоотчеты
+                    user_groups = group_users_by_display_name(users)
+                    
                     incomplete_users = []
-                    for u in users:
-                        remaining = await CheckoutReportCRUD.get_remaining_keywords(
-                            session, u.id, cev.id
-                        )
-                        if remaining:
-                            incomplete_users.append((u, remaining))
+                    for group_key, group_users in user_groups.items():
+                        group_incomplete = True
+                        group_remaining = None
+                        representative = None
+                        
+                        for u in group_users:
+                            remaining = await CheckoutReportCRUD.get_remaining_keywords(
+                                session, u.id, cev.id
+                            )
+                            
+                            if not remaining:
+                                group_incomplete = False
+                                break
+                            
+                            if representative is None:
+                                representative = u
+                                group_remaining = remaining
+                        
+                        if group_incomplete and representative and group_remaining:
+                            incomplete_users.append((representative, group_remaining))
 
                     if incomplete_users:
                         await self.send_checkout_second_reminder(
@@ -406,9 +503,11 @@ class ReportScheduler:
 
     async def send_checkout_first_reminder(self, debtors, channel, keyword, deadline_time):
         """Напоминание о первом этапе checkout"""
+        unique_debtors = filter_one_user_per_display_name(debtors)
+        
         debt_list = [
-            f"{i}. @{u.username}" if u.username else f"{i}. {u.full_name}"
-            for i, u in enumerate(debtors, 1)
+            f"{i}. {format_user_mention(u)}"
+            for i, u in enumerate(unique_debtors, 1)
         ]
 
         text = (
@@ -433,9 +532,15 @@ class ReportScheduler:
             self, incomplete_users, channel, keyword, deadline_time
     ):
         """Напоминание о втором этапе checkout"""
+        grouped = {}
+        for u, remaining in incomplete_users:
+            key = u.display_name if u.display_name else f"unique_{u.telegram_id}"
+            if key not in grouped:
+                grouped[key] = (u, remaining)
+
         debt_list = []
-        for i, (u, remaining) in enumerate(incomplete_users, 1):
-            username = f"@{u.username}" if u.username else u.full_name
+        for i, (u, remaining) in enumerate(grouped.values(), 1):
+            username = format_user_mention(u)
             remaining_str = ", ".join(remaining)
             debt_list.append(f"{i}. {username} — осталось: {remaining_str}")
 
@@ -460,9 +565,11 @@ class ReportScheduler:
             self, debtors, channel, keyword, deadline_time, is_temp=False
     ):
         """Отправка напоминания ПОСЛЕ дедлайна"""
+        unique_debtors = filter_one_user_per_display_name(debtors)
+        
         debt_list = [
-            f"{i}. @{u.username}" if u.username else f"{i}. {u.full_name}"
-            for i, u in enumerate(debtors, 1)
+            f"{i}. {format_user_mention(u)}"
+            for i, u in enumerate(unique_debtors, 1)
         ]
 
         event_type = "⏱ Временный отчет" if is_temp else "📋 Отчет"
@@ -526,44 +633,61 @@ class ReportScheduler:
         late = []  # Немного опоздали
         not_submitted = []  # Не сдали
 
-        for user in users:
-            submission = await CheckoutSubmissionCRUD.get_today_submission(
-                session, user.id, checkout_event.id
-            )
+        user_groups = group_users_by_display_name(users)
 
-            if not submission:
-                not_submitted.append(user)
-                continue
+        for group_key, group_users in user_groups.items():
+            # Проверяем все аккаунты в группе
+            group_status = None  # None, 'on_time', 'late', 'not_submitted'
+            group_representative = group_users[0]
+            latest_submission_time = None
+            
+            for user in group_users:
+                submission = await CheckoutSubmissionCRUD.get_today_submission(
+                    session, user.id, checkout_event.id
+                )
 
-            reports = await CheckoutReportCRUD.get_today_reports(
-                session, user.id, checkout_event.id
-            )
+                if not submission:
+                    continue
 
-            if not reports:
-                not_submitted.append(user)
-                continue
+                reports = await CheckoutReportCRUD.get_today_reports(
+                    session, user.id, checkout_event.id
+                )
 
-            # Проверяем, все ли сдано
-            remaining = await CheckoutReportCRUD.get_remaining_keywords(
-                session, user.id, checkout_event.id
-            )
+                if not reports:
+                    continue
 
-            if remaining:
-                not_submitted.append(user)
-                continue
+                # Проверяем, все ли сдано
+                remaining = await CheckoutReportCRUD.get_remaining_keywords(
+                    session, user.id, checkout_event.id
+                )
 
-            # Проверяем время сдачи последнего отчета
-            last_report = max(reports, key=lambda r: r.submitted_at)
-            deadline = datetime.combine(today, checkout_event.second_deadline_time)
-            deadline = pytz.timezone(settings.TZ).localize(deadline)
+                if remaining:
+                    continue
 
-            # Конвертируем время сдачи в UTC+3 для сравнения
-            submitted_time = last_report.submitted_at.astimezone(pytz.timezone(settings.TZ))
+                # Этот аккаунт сдал все - проверяем время
+                last_report = max(reports, key=lambda r: r.submitted_at)
+                deadline = datetime.combine(today, checkout_event.second_deadline_time)
+                deadline = pytz.timezone(settings.TZ).localize(deadline)
 
-            if submitted_time <= deadline:
-                on_time.append(user)
+                submitted_time = last_report.submitted_at.astimezone(pytz.timezone(settings.TZ))
+
+                # Обновляем статус группы на лучший
+                if submitted_time <= deadline:
+                    group_status = 'on_time'
+                    group_representative = user
+                    break  # on_time - лучший статус, можно прервать
+                elif group_status != 'on_time':
+                    group_status = 'late'
+                    group_representative = user
+                    latest_submission_time = submitted_time
+            
+            # Добавляем группу в соответствующую категорию
+            if group_status == 'on_time':
+                on_time.append(group_representative)
+            elif group_status == 'late':
+                late.append((group_representative, latest_submission_time))
             else:
-                late.append((user, submitted_time))
+                not_submitted.append(group_representative)
 
         # Формируем статистику
         text = f"📊 <b>Статистика по событию '{checkout_event.first_keyword}'</b>\n\n"
@@ -571,14 +695,14 @@ class ReportScheduler:
         if on_time:
             text += "✅ <b>Сдали отчеты вовремя:</b>\n"
             for i, u in enumerate(on_time, 1):
-                username = f"@{u.username}" if u.username else u.full_name
+                username = format_user_mention(u)
                 text += f"{i}. {username}\n"
             text += "\n"
 
         if late:
             text += "⚠️ <b>Немного опоздали со сдачей отчетов:</b>\n"
             for i, (u, submitted_at) in enumerate(late, 1):
-                username = f"@{u.username}" if u.username else u.full_name
+                username = format_user_mention(u)
                 time_str = submitted_at.strftime('%H:%M')
                 text += f"{i}. {username} (сдал в {time_str})\n"
             text += "\n"
@@ -586,7 +710,7 @@ class ReportScheduler:
         if not_submitted:
             text += "❌ <b>До сих пор не сдали отчет (или отчеты):</b>\n"
             for i, u in enumerate(not_submitted, 1):
-                username = f"@{u.username}" if u.username else u.full_name
+                username = format_user_mention(u)
                 text += f"{i}. {username}\n"
             text += "\n"
             text += "<i>Те, которые указаны в этом списке — жду причину почему, " \

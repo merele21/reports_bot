@@ -1,10 +1,11 @@
 import logging
+import re
 import shlex
 from datetime import time, date
 from typing import Dict, Optional
 
 from aiogram import Router, F, html
-from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.filters import Command, CommandObject, StateFilter, state
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -30,6 +31,10 @@ class EventDeletionStates(StatesGroup):
 
 class EventCreationStates(StatesGroup):
     waiting_for_users = State()
+
+
+class RegistrationStates(StatesGroup):
+    waiting_for_display_name = State()
 
 
 # --- Вспомогательные функции ---
@@ -61,7 +66,15 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 
 @router.message(Command("register"))
-async def cmd_register(message: Message, session: AsyncSession):
+async def cmd_register(message: Message, command: CommandObject, session: AsyncSession):
+    """
+    Регистрация с опциональным store_id
+
+    Форматы:
+    /register - регистрация без store_id
+    /register MSK-001 - регистрация с store_id
+    """
+
     is_private = message.chat.type == "private"
     thread_id = message.message_thread_id if message.is_topic_message else None
 
@@ -71,25 +84,52 @@ async def cmd_register(message: Message, session: AsyncSession):
 
     if is_private or is_reg_thread:
         telegram_id = message.from_user.id
+        store_id = None
+        if command.args:
+            store_id = command.args.strip().upper()  # Нормализуем к верхнему регистру
+
+            # Валидация формата (опционально)
+            if not re.match(r'^[A-Z0-9\-]{3,50}$', store_id):
+                await message.answer(
+                    "❌ Неверный формат ID магазина.\n\n"
+                    "Используйте формат: <code>MSK-001</code>, <code>SPB-042</code>\n"
+                    "Только буквы, цифры и дефисы (3-50 символов)"
+                )
+                return
+
         existing_user = await UserCRUD.get_by_telegram_id(session, telegram_id)
 
         user = await UserCRUD.get_or_create(
             session,
             telegram_id=telegram_id,
-            username=message.from_user.username or "",
-            full_name=message.from_user.full_name,
+            username=message.from_user.username or None,
+            full_name=message.from_user.full_name or None,
+            store_id=store_id or None
         )
 
         if existing_user:
-            await message.answer(
-                f"<b>Вы уже зарегистрированы, {user.full_name}!</b>\n"
-                f"Ваш ID: <code>{user.telegram_id}</code>"
-            )
+            response = f"<b>Профиль обновлен, {user.full_name or 'пользователь'}!</b>\n\n"
+            response += f"Telegram ID: <code>{user.telegram_id}</code>\n"
+            if user.username:
+                response += f"Username: @{user.username}\n"
+            if user.store_id:
+                response += f"ID магазина: <code>{user.store_id}</code>\n"
+            else:
+                response += "\n💡 Совет: укажите ID магазина для группировки:\n"
+                response += "<code>/register MSK-001</code>"
         else:
-            await message.answer(
-                f"<b>Привет, {user.full_name}!</b>\n\n"
-                f"Вы успешно зарегистрированы."
-            )
+            response = f"<b>Добро пожаловать, {user.full_name or 'пользователь'}!</b>\n\n"
+            response += "✅ Вы успешно зарегистрированы.\n\n"
+            response += f"Telegram ID: <code>{user.telegram_id}</code>\n"
+            if user.username:
+                response += f"Username: @{user.username}\n"
+            if user.store_id:
+                response += f"ID магазина: <code>{user.store_id}</code>\n"
+            else:
+                response += "\n💡 Чтобы указать ID магазина, используйте:\n"
+                response += "<code>/register MSK-001</code>"
+
+        await message.answer(response)
     else:
         bot_info = await message.bot.get_me()
         bot_link = f"https://t.me/{bot_info.username}"
@@ -100,7 +140,6 @@ async def cmd_register(message: Message, session: AsyncSession):
             f"или перейдите в ветку <b>Регистрация</b>.",
             disable_web_page_preview=True
         )
-
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
@@ -345,6 +384,100 @@ async def cmd_rm_users(message: Message, command: CommandObject, session: AsyncS
 
     await message.answer("\n\n".join(response))
 
+
+@router.message(Command("add_users_by_store"))
+async def cmd_add_users_by_store(
+        message: Message,
+        command: CommandObject,
+        session: AsyncSession
+):
+    """
+    Добавить всех пользователей с определенным store_id
+
+    Формат: /add_users_by_store MSK-001
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+
+    if not channel:
+        await message.answer("Канал не настроен. Сначала используйте /add_channel")
+        return
+
+    if not command.args:
+        await message.answer(
+            "<b>Формат:</b> <code>/add_users_by_store MSK-001</code>\n\n"
+            "Добавит всех пользователей с указанным ID магазина"
+        )
+        return
+
+    store_id = command.args.strip().upper()
+
+    # Получаем всех пользователей магазина
+    users = await UserCRUD.get_by_store_id(session, store_id)
+
+    if not users:
+        await message.answer(f"❌ Пользователей с ID магазина <code>{store_id}</code> не найдено")
+        return
+
+    added_names = []
+    already_in_names = []
+
+    for u in users:
+        name = f"@{u.username}" if u.username else f"ID:{u.telegram_id}"
+
+        if not await UserChannelCRUD.in_user_in_channel(session, u.id, channel.id):
+            await UserChannelCRUD.add_user_to_channel(session, u.id, channel.id)
+            added_names.append(name)
+        else:
+            already_in_names.append(name)
+
+    response = []
+    if added_names:
+        response.append(
+            f"<b>✅ Успешно добавлены из магазина {store_id}:</b>\n" +
+            "\n".join([f"• {n}" for n in added_names])
+        )
+    if already_in_names:
+        response.append(
+            f"<b>⚠️ Уже были добавлены:</b>\n" +
+            "\n".join([f"• {n}" for n in already_in_names])
+        )
+    if not response:
+        response.append("Никто не был добавлен.")
+
+    await message.answer("\n\n".join(response))
+
+
+@router.message(Command("list_stores"))
+async def cmd_list_stores(message: Message, session: AsyncSession):
+    """Показать список всех магазинов (store_id) с количеством пользователей"""
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    # Запрос группировки по store_id
+    stmt = (
+        select(User.store_id, func.count(User.id).label('count'))
+        .where(User.is_active == True, User.store_id.isnot(None))
+        .group_by(User.store_id)
+        .order_by(User.store_id)
+    )
+    result = await session.execute(stmt)
+    stores = result.all()
+
+    if not stores:
+        await message.answer("📋 Магазины с ID не найдены")
+        return
+
+    text = "<b>📋 Список магазинов:</b>\n\n"
+    for store_id, count in stores:
+        text += f"• <code>{store_id}</code> — {count} чел.\n"
+
+    await message.answer(text)
 
 # --- Управление Каналами и Событиями ---
 

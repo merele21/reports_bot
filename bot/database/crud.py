@@ -74,8 +74,22 @@ def parse_checkout_keywords(text: str) -> List[str]:
 class UserCRUD:
     @staticmethod
     async def get_or_create(
-            session: AsyncSession, telegram_id: int, username: str, full_name: str
+            session: AsyncSession,
+            telegram_id: int,
+            username: Optional[str] = None,
+            full_name: Optional[str] = None,
+            store_id: Optional[str] = None
     ) -> User:
+        """
+        Создает или обновляет пользователя
+
+        Args:
+            telegram_id: Обязательный Telegram ID
+            username: Опциональный username
+            full_name: Опциональный полное имя
+            store_id: Опциональный ID магазина (например, "MSK-001")
+        """
+
         stmt = select(User).where(User.telegram_id == telegram_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
@@ -91,17 +105,36 @@ class UserCRUD:
                 session.add(other)
 
         if not user:
-            user = User(telegram_id=telegram_id, username=username, full_name=full_name)
+            user = User(
+                telegram_id=telegram_id,
+                username=username or None,
+                full_name=full_name or None,
+                store_id=store_id or None
+            )
             session.add(user)
             await session.commit()
             await session.refresh(user)
         else:
-            if user.username != username or user.full_name != full_name:
+            # Обновляем только если данные изменились
+            updated = False
+
+            if user.username != username:
                 user.username = username
+                updated = True
+
+            if user.full_name != full_name:
                 user.full_name = full_name
+                updated = True
+
+            if store_id and user.store_id != store_id:
+                user.store_id = store_id
+                updated = True
+
+            if updated:
                 session.add(user)
                 await session.commit()
                 await session.refresh(user)
+
         return user
 
     @staticmethod
@@ -109,6 +142,19 @@ class UserCRUD:
         stmt = select(User).where(User.telegram_id == telegram_id)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_store_id(
+            session: AsyncSession,
+            store_id: str
+    ) -> List[User]:
+        """Получить всех пользователей магазина"""
+        stmt = select(User).where(
+            User.store_id == store_id,
+            User.is_active == True
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 
 
 class ChannelCRUD:

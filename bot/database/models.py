@@ -11,7 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     UniqueConstraint,
-    JSON,
+    JSON, Index,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -26,7 +26,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    full_name: Mapped[str] = mapped_column(String(255))
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    store_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True) # Примеры: "MSK-001", "SPB-042", "KRD-15"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -54,6 +55,11 @@ class User(Base):
     )
     keyword_reports: Mapped[list["KeywordReport"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
+    )
+
+    # Индекс для быстрого поиска по store_id
+    __table_args__ = (
+        Index('ix_users_store_id', 'store_id'),
     )
 
 
