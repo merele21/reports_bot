@@ -26,7 +26,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
     """
     Обработка первого этапа checkout событий (утренний пересчет)
     Только для ТЕКСТОВЫХ сообщений БЕЗ фото
-    Пример: "Пересчет: скоропорт + тихое + бакалея"
+    Пример: "Категории: скоропорт + тихое + бакалея"
 
     Если пересчет с фото - обрабатывается в handle_photo_message
     """
@@ -51,8 +51,8 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
     user = await UserCRUD.get_or_create(
         session,
         telegram_id=message.from_user.id,
-        username=message.from_user.username or "",
-        full_name=message.from_user.full_name,
+        username=message.from_user.username or None,
+        full_name=message.from_user.full_name or None,
     )
 
     # Проверяем права
@@ -134,7 +134,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
             session, user.id, checkout_event.id
         )
         if existing:
-            await message.reply(f"❌ Вы уже отправили пересчет по '{checkout_event.first_keyword}' сегодня.")
+            await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
             return
 
         # Парсим ключевые слова после first_keyword
@@ -165,7 +165,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
                 f"Пожалуйста, используйте слова из списка:\n"
                 f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
                 f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-                f"шоколад, нонфуд"
+                f"шоколад, нонфуд, штучки"
             )
             return
 
@@ -176,11 +176,11 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 
         keywords_str = ", ".join(keywords)
         await message.reply(
-            f"✅ Пересчет принят!\n\n"
+            f"✅ Категории приняты!\n\n"
             f"📋 Категории: <b>{keywords_str}</b>\n"
             f"⏰ До {checkout_event.second_deadline_time.strftime('%H:%M')} "
-            f"отправьте фотоотчеты с указанием:\n"
-            f"<code>{checkout_event.second_keyword}: [категория]</code>"
+            f"отправьте отчеты с указанием:\n"
+            f"<code>{checkout_event.second_keyword}: [Категория(-и)]</code>"
         )
 
         logger.info(
@@ -193,7 +193,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.photo)
 async def handle_photo_message(message: Message, session: AsyncSession):
     """
-    Обработка фотоотчетов:
+    Обработка отчетов:
     1. Обычные события (Event)
     2. Временные события (TempEvent)
     3. Checkout события (второй этап)
@@ -212,8 +212,8 @@ async def handle_photo_message(message: Message, session: AsyncSession):
     user = await UserCRUD.get_or_create(
         session,
         telegram_id=message.from_user.id,
-        username=message.from_user.username or "",
-        full_name=message.from_user.full_name,
+        username=message.from_user.username or None,
+        full_name=message.from_user.full_name or None
     )
 
     # Проверка прав
@@ -243,8 +243,8 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         if not submission:
             await message.reply(
-                f"❌ Сначала нужно отправить пересчет с указанием категорий:\n"
-                f"<code>{checkout_event.first_keyword}: [категории]</code>"
+                f"❌ Сначала нужно отправить отчет с указанием категорий:\n"
+                f"<code>{checkout_event.first_keyword}: [Категория(-и)]</code>"
             )
             return
 
@@ -284,7 +284,7 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         if not report_keywords:
             await message.reply(
-                f"⚠️ Укажите категорию после '{checkout_event.second_keyword}'.\n"
+                f"⚠️ Укажите категорию(-и) после '{checkout_event.second_keyword}'.\n"
                 f"Например: <code>{checkout_event.second_keyword}: скоропорт</code>"
             )
             return
@@ -322,13 +322,13 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         # Формируем ответ
         if is_complete:
             await message.reply(
-                f"✅ <b>@{user.username or user.full_name}</b> успешно сдал все отчеты, спасибо! 🎉"
+                f"✅ <b>@{user.username or user.store_id}</b> успешно сдал все отчеты, спасибо! 🎉"
             )
         else:
             completed_str = ", ".join(report_keywords)
             remaining_str = ", ".join(new_remaining)
             await message.reply(
-                f"✅ <b>@{user.username or user.full_name}</b> успешно сдал отчет по: <b>{completed_str}</b>\n\n"
+                f"✅ <b>@{user.username or user.store_id}</b> успешно сдал отчет по: <b>{completed_str}</b>\n\n"
                 f"📋 Еще осталось сдать отчет по: <b>{remaining_str}</b>"
             )
 
@@ -355,7 +355,7 @@ async def handle_photo_message(message: Message, session: AsyncSession):
             session, user.id, checkout_event.id
         )
         if existing:
-            await message.reply(f"❌ Вы уже отправили пересчет по '{checkout_event.first_keyword}' сегодня.")
+            await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
             return
 
         # Парсим ключевые слова после first_keyword
@@ -384,7 +384,7 @@ async def handle_photo_message(message: Message, session: AsyncSession):
                 f"Пожалуйста, используйте слова из списка:\n"
                 f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
                 f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-                f"шоколад, нонфуд"
+                f"шоколад, нонфуд, штучки"
             )
             return
 
@@ -395,11 +395,11 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         keywords_str = ", ".join(keywords)
         await message.reply(
-            f"✅ Пересчет принят!\n\n"
+            f"✅ Категории приняты!\n\n"
             f"📋 Категории: <b>{keywords_str}</b>\n"
             f"⏰ До {checkout_event.second_deadline_time.strftime('%H:%M')} "
-            f"отправьте фотоотчеты с указанием:\n"
-            f"<code>{checkout_event.second_keyword}: [категория]</code>"
+            f"отправьте фото с указанием:\n"
+            f"<code>{checkout_event.second_keyword}: [Категория(-и)]</code>"
         )
 
         logger.info(
