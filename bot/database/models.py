@@ -30,7 +30,7 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    store_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True) # Примеры: "MSK-001", "SPB-042", "KRD-15"
+    store_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True) # Примеры: "MSK-001", "SPB-042", "KRD-15"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
