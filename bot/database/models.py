@@ -46,6 +46,15 @@ class User(Base):
     checkout_reports: Mapped[list["CheckoutReport"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    notext_reports: Mapped[list["NoTextReport"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    notext_day_offs: Mapped[list["NoTextDayOff"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    keyword_reports: Mapped[list["KeywordReport"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Channel(Base):
@@ -77,6 +86,12 @@ class Channel(Base):
         back_populates="channel", cascade="all, delete-orphan"
     )
     checkout_events: Mapped[list["CheckoutEvent"]] = relationship(
+        back_populates="channel", cascade="all, delete-orphan"
+    )
+    notext_events: Mapped[list["NoTextEvent"]] = relationship(
+        back_populates="channel", cascade="all, delete-orphan"
+    )
+    keyword_events: Mapped[list["KeywordEvent"]] = relationship(
         back_populates="channel", cascade="all, delete-orphan"
     )
     user_channels: Mapped[list["UserChannel"]] = relationship(
@@ -157,9 +172,6 @@ class CheckoutEvent(Base):
 
     min_photos: Mapped[int] = mapped_column(Integer, default=1)
 
-    # Время выгрузки вечерней статистики (по умолчанию 22:00 МСК)
-    stats_time: Mapped[Optional[dt_time]] = mapped_column(Time, nullable=True, default=None)
-
     # Словарь допустимых ключевых слов (JSON)
     # Пример: ["элитка", "сигареты", "тихое", "водка", ...]
     allowed_keywords: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -221,6 +233,112 @@ class CheckoutReport(Base):
     # Relationships
     user: Mapped["User"] = relationship(back_populates="checkout_reports")
     checkout_event: Mapped["CheckoutEvent"] = relationship(back_populates="reports")
+
+
+class NoTextEvent(Base):
+    """Событие без текста - отслеживание по времени только с фото"""
+    __tablename__ = "notext_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+
+    deadline_start: Mapped[dt_time] = mapped_column(Time)  # Начало отслеживания
+    deadline_end: Mapped[dt_time] = mapped_column(Time)  # Конец отслеживания (строгий дедлайн)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    channel: Mapped["Channel"] = relationship(back_populates="notext_events")
+    reports: Mapped[list["NoTextReport"]] = relationship(
+        back_populates="notext_event", cascade="all, delete-orphan"
+    )
+    day_offs: Mapped[list["NoTextDayOff"]] = relationship(
+        back_populates="notext_event", cascade="all, delete-orphan"
+    )
+
+
+class NoTextReport(Base):
+    """Отчеты для notext событий"""
+    __tablename__ = "notext_reports"
+    __table_args__ = (
+        UniqueConstraint("user_id", "notext_event_id", "report_date", name="uix_user_notext_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    notext_event_id: Mapped[int] = mapped_column(ForeignKey("notext_events.id", ondelete="CASCADE"))
+
+    report_date: Mapped[date] = mapped_column(Date, default=date.today)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    message_id: Mapped[int] = mapped_column(Integer)
+    is_on_time: Mapped[bool] = mapped_column(Boolean, default=True)  # Сдано вовремя или нет
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="notext_reports")
+    notext_event: Mapped["NoTextEvent"] = relationship(back_populates="reports")
+
+
+class NoTextDayOff(Base):
+    """Выходные дни для notext событий"""
+    __tablename__ = "notext_day_offs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "notext_event_id", "day_off_date", name="uix_user_notext_dayoff"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    notext_event_id: Mapped[int] = mapped_column(ForeignKey("notext_events.id", ondelete="CASCADE"))
+
+    day_off_date: Mapped[date] = mapped_column(Date, default=date.today)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="notext_day_offs")
+    notext_event: Mapped["NoTextEvent"] = relationship(back_populates="day_offs")
+
+
+class KeywordEvent(Base):
+    """Событие с ключевым словом (для open/close)"""
+    __tablename__ = "keyword_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+
+    deadline_start: Mapped[dt_time] = mapped_column(Time)  # Начало отслеживания
+    deadline_end: Mapped[dt_time] = mapped_column(Time)  # Конец отслеживания
+    keyword: Mapped[str] = mapped_column(String(100))  # Ключевое слово для поиска (regex)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    channel: Mapped["Channel"] = relationship(back_populates="keyword_events")
+    reports: Mapped[list["KeywordReport"]] = relationship(
+        back_populates="keyword_event", cascade="all, delete-orphan"
+    )
+
+
+class KeywordReport(Base):
+    """Отчеты для keyword событий"""
+    __tablename__ = "keyword_reports"
+    __table_args__ = (
+        UniqueConstraint("user_id", "keyword_event_id", "report_date", name="uix_user_keyword_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    keyword_event_id: Mapped[int] = mapped_column(ForeignKey("keyword_events.id", ondelete="CASCADE"))
+
+    report_date: Mapped[date] = mapped_column(Date, default=date.today)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    message_id: Mapped[int] = mapped_column(Integer)
+    message_text: Mapped[str] = mapped_column(Text)
+    is_on_time: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="keyword_reports")
+    keyword_event: Mapped["KeywordEvent"] = relationship(back_populates="reports")
 
 
 class UserChannel(Base):

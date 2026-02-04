@@ -581,7 +581,7 @@ async def cmd_add_tmp_event(message: Message, command: CommandObject, session: A
 async def cmd_add_event_checkout(message: Message, command: CommandObject, session: AsyncSession):
     """
     Двухэтапное событие: пересчет (утро) -> готово (вечер)
-    Формат: /add_event_checkout "Пересчет" 10:00 "Готово" 16:00 [мин_фото] [время_статистики]
+    Формат: /add_event_checkout "Пересчет" 10:00 "Готово" 16:00 1
     """
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
@@ -590,25 +590,17 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
     if not command.args:
         await message.answer(
             "<b>Формат команды:</b>\n"
-            "<code>/add_event_checkout \"first_kw\" first_d_t \"second_kw\" second_d_t [min_photos] [stats_time]</code>\n\n"
-            "<b>Пример 1 (базовый):</b>\n"
-            "<code>/add_event_checkout \"Пересчет\" 10:00 \"Готово\" 16:00</code>\n\n"
-            "<b>Пример 2 (с минимум фото):</b>\n"
+            "<code>/add_event_checkout \"Первый ключ\" ЧЧ:ММ \"Второй ключ\" ЧЧ:ММ [мин_фото]</code>\n\n"
+            "<b>Пример:</b>\n"
             "<code>/add_event_checkout \"Пересчет\" 10:00 \"Готово\" 16:00 1</code>\n\n"
-            "<b>Пример 3 (с временем статистики):</b>\n"
-            "<code>/add_event_checkout \"Пересчет\" 10:00 \"Готово\" 16:00 1 23:00</code>\n\n"
-            "<b>Параметры:</b>\n"
-            "• min_photos - минимум фото (по умолчанию: 1)\n"
-            "• stats_time - время вечерней статистики (по умолчанию: 22:00 МСК)\n\n"
             "<b>Как это работает:</b>\n"
             "1️⃣ Утром люди пишут: <code>Пересчет: скоропорт + тихое</code>\n"
             "2️⃣ Вечером отправляют фото с: <code>Готово: скоропорт</code>\n"
-            "3️⃣ Бот отслеживает, что сдано, а что нет\n"
-            "4️⃣ В указанное время отправляется статистика\n\n"
+            "3️⃣ Бот отслеживает, что сдано, а что нет\n\n"
             "📋 Допустимые категории:\n"
             "элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
             "скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-            "шоколад, нонфуд, выходной"
+            "шоколад, нонфуд"
         )
         return
 
@@ -616,42 +608,14 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
         parts = shlex.split(command.args)
 
         if len(parts) < 4:
-            await message.answer("Недостаточно аргументов. Нужно минимум: 2 ключевых слова + 2 времени.")
+            await message.answer("Недостаточно аргументов. Нужно: 2 ключевых слова + 2 времени.")
             return
 
         first_keyword = parts[0]
         first_time_str = parts[1]
         second_keyword = parts[2]
         second_time_str = parts[3]
-        
-        # Опциональный параметр min_photos
-        min_photos = 1
-        if len(parts) >= 5 and parts[4].replace(':', '').isdigit():
-            # Проверяем, это время или число
-            if ':' in parts[4]:
-                # Это время статистики, а min_photos остается 1
-                pass
-            else:
-                min_photos = int(parts[4])
-        
-        # Опциональный параметр stats_time
-        stats_time = None
-        if len(parts) >= 6:
-            # Шестой параметр - время статистики
-            try:
-                h_s, m_s = map(int, parts[5].split(':'))
-                stats_time = time(h_s, m_s)
-            except:
-                await message.answer("⚠️ Ошибка формата времени статистики! Используйте ЧЧ:ММ.")
-                return
-        elif len(parts) == 5 and ':' in parts[4]:
-            # Пятый параметр - время статистики (min_photos пропущен)
-            try:
-                h_s, m_s = map(int, parts[4].split(':'))
-                stats_time = time(h_s, m_s)
-            except:
-                await message.answer("⚠️ Ошибка формата времени статистики! Используйте ЧЧ:ММ.")
-                return
+        min_photos = int(parts[4]) if len(parts) >= 5 and parts[4].isdigit() else 1
 
         if len(first_keyword) > 24 or len(second_keyword) > 24:
             await message.answer("⚠️ Ключевые слова не должны превышать 24 символа.")
@@ -664,7 +628,7 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
             h2, m2 = map(int, second_time_str.split(':'))
             second_deadline = time(h2, m2)
         except:
-            await message.answer("❌ Ошибка формата времени дедлайнов! Используйте ЧЧ:ММ.")
+            await message.answer("❌ Ошибка формата времени! Используйте ЧЧ:ММ.")
             return
 
         if first_deadline >= second_deadline:
@@ -681,26 +645,22 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
             session, channel.id,
             first_keyword, first_deadline,
             second_keyword, second_deadline,
-            min_photos, stats_time
+            min_photos
         )
 
-        stats_info = f"📊 Время статистики: <b>{stats_time.strftime('%H:%M')}</b>\n" if stats_time else "📊 Время статистики: <b>22:00 МСК (по умолчанию)</b>\n"
-        
         await message.answer(
             f"✅ Двухэтапное событие создано!\n\n"
             f"1️⃣ <b>{html.quote(first_keyword)}</b> до {first_deadline.strftime('%H:%M')}\n"
             f"2️⃣ <b>{html.quote(second_keyword)}</b> до {second_deadline.strftime('%H:%M')}\n"
-            f"📸 Минимум фото: {min_photos}\n"
-            f"{stats_info}\n"
+            f"📸 Минимум фото: {min_photos}\n\n"
             f"<i>Люди должны будут указывать категории из списка:\n"
             f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
             f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-            f"шоколад, нонфуд, выходной</i>"
+            f"шоколад, нонфуд</i>"
         )
     except Exception as e:
         logger.error(f"Error in add_event_checkout: {e}", exc_info=True)
         await message.answer("Произошла ошибка при сохранении checkout события.")
-
 
 
 @router.message(Command("rm_event"))
@@ -725,8 +685,15 @@ async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSessio
     
     # Получаем checkout события
     checkout_events = await CheckoutEventCRUD.get_active_by_channel(session, channel.id)
+    
+    # Получаем notext события
+    from bot.database.crud import NoTextEventCRUD, KeywordEventCRUD
+    notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
+    
+    # Получаем keyword события (open/close)
+    keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
 
-    if not events and not temp_events and not checkout_events:
+    if not events and not temp_events and not checkout_events and not notext_events and not keyword_events:
         await message.answer("В этой ветке пока нет событий.")
         return
 
@@ -761,6 +728,26 @@ async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSessio
                     f"({checkout_event.first_deadline_time.strftime('%H:%M')} → "
                     f"{checkout_event.second_deadline_time.strftime('%H:%M')})\n")
             counter += 1
+        text += "\n"
+    
+    # Добавляем notext события
+    if notext_events:
+        text += "<b>📸 События без текста (notext):</b>\n"
+        for notext_event in notext_events:
+            idx_map[str(counter)] = ('notext_event', notext_event.id)
+            text += (f"{counter}. Отслеживание фото с <b>{notext_event.deadline_start.strftime('%H:%M')}</b> "
+                    f"до <b>{notext_event.deadline_end.strftime('%H:%M')}</b>\n")
+            counter += 1
+        text += "\n"
+    
+    # Добавляем keyword события
+    if keyword_events:
+        text += "<b>🔑 События с ключевым словом (open/close):</b>\n"
+        for keyword_event in keyword_events:
+            idx_map[str(counter)] = ('keyword_event', keyword_event.id)
+            text += (f"{counter}. <b>{keyword_event.keyword}</b> с <b>{keyword_event.deadline_start.strftime('%H:%M')}</b> "
+                    f"до <b>{keyword_event.deadline_end.strftime('%H:%M')}</b>\n")
+            counter += 1
 
     await state.update_data(deletion_idx_map=idx_map)
     await state.set_state(EventDeletionStates.waiting_for_event_index)
@@ -789,6 +776,8 @@ async def process_rm_event_index(message: Message, state: FSMContext, session: A
 
     event_type, event_id = user_map[val]
     
+    from bot.database.crud import NoTextEventCRUD, KeywordEventCRUD
+    
     success = False
     if event_type == 'event':
         success = await EventCRUD.delete(session, event_id)
@@ -799,6 +788,14 @@ async def process_rm_event_index(message: Message, state: FSMContext, session: A
     elif event_type == 'checkout_event':
         success = await CheckoutEventCRUD.delete(session, event_id)
         event_name = "Двухэтапное событие"
+    elif event_type == 'notext_event':
+        await NoTextEventCRUD.delete(session, event_id)
+        success = True
+        event_name = "Событие без текста"
+    elif event_type == 'keyword_event':
+        await KeywordEventCRUD.delete(session, event_id)
+        success = True
+        event_name = "Событие с ключевым словом"
     
     if success:
         await message.answer(f"✅ {event_name} успешно удалено.")
@@ -1026,3 +1023,217 @@ async def cmd_get_thread_id(message: Message):
         f"ID ветки (thread_id): <code>{thread_id}</code>\n\n"
     )
     await message.answer(response)
+
+
+@router.message(Command("add_event_notext"))
+async def cmd_add_event_notext(message: Message, command: CommandObject, session: AsyncSession):
+    """
+    Событие без текста - отслеживание только фото по расписанию
+    Формат: /add_event_notext ЧЧ:ММ ЧЧ:ММ
+    Пример: /add_event_notext 09:00 18:00
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    if not command.args:
+        await message.answer(
+            "<b>Формат команды:</b>\n"
+            "<code>/add_event_notext [начало] [конец]</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_event_notext 09:00 18:00</code>\n\n"
+            "Бот будет отслеживать отправку фото (желательно) от зарегистрированных пользователей "
+            "в указанный промежуток времени. Статистика публикуется строго в время [конец].\n\n"
+            "Для выходного дня пользователь пишет: <code>выходной</code>"
+        )
+        return
+
+    try:
+        parts = command.args.split()
+        if len(parts) < 2:
+            await message.answer("Недостаточно аргументов. Укажите время начала и конца.")
+            return
+
+        start_str = parts[0]
+        end_str = parts[1]
+
+        try:
+            h1, m1 = map(int, start_str.split(':'))
+            deadline_start = time(h1, m1)
+
+            h2, m2 = map(int, end_str.split(':'))
+            deadline_end = time(h2, m2)
+        except:
+            await message.answer("❌ Ошибка формата времени! Используйте ЧЧ:ММ.")
+            return
+
+        if deadline_start >= deadline_end:
+            await message.answer("⚠️ Время начала должно быть раньше времени конца!")
+            return
+
+        thread_id = message.message_thread_id if message.is_topic_message else None
+        channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+        if not channel:
+            await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
+            return
+
+        from bot.database.crud import NoTextEventCRUD
+        await NoTextEventCRUD.create(
+            session, channel.id, deadline_start, deadline_end
+        )
+
+        await message.answer(
+            f"✅ Событие без текста создано!\n\n"
+            f"⏰ Отслеживание: с <b>{deadline_start.strftime('%H:%M')}</b> до <b>{deadline_end.strftime('%H:%M')}</b>\n"
+            f"📊 Статистика будет опубликована в <b>{deadline_end.strftime('%H:%M')}</b>\n\n"
+            f"📝 Для выходного дня пользователь пишет: <code>выходной</code>"
+        )
+    except Exception as e:
+        logger.error(f"Error in add_event_notext: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при создании события.")
+
+
+@router.message(Command("add_event_open"))
+async def cmd_add_event_open(message: Message, command: CommandObject, session: AsyncSession):
+    """
+    Событие с ключевым словом (например, "открыт")
+    Формат: /add_event_open ЧЧ:ММ ЧЧ:ММ "ключевое слово"
+    Пример: /add_event_open 09:00 18:00 "открыт"
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    if not command.args:
+        await message.answer(
+            "<b>Формат команды:</b>\n"
+            "<code>/add_event_open [начало] [конец] \"ключевое слово\"</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_event_open 09:00 18:00 \"открыт\"</code>\n\n"
+            "Ключевое слово может быть в любом месте сообщения и поддерживает вариации:\n"
+            "открыт, открыта, открыто, открытие (до 5 символов после базового слова)"
+        )
+        return
+
+    try:
+        parts = shlex.split(command.args)
+        if len(parts) < 3:
+            await message.answer("Недостаточно аргументов. Проверьте формат команды.")
+            return
+
+        start_str = parts[0]
+        end_str = parts[1]
+        keyword = parts[2]
+
+        if len(keyword) > 24:
+            await message.answer("⚠️ Ключевое слово не должно превышать 24 символа.")
+            return
+
+        try:
+            h1, m1 = map(int, start_str.split(':'))
+            deadline_start = time(h1, m1)
+
+            h2, m2 = map(int, end_str.split(':'))
+            deadline_end = time(h2, m2)
+        except:
+            await message.answer("❌ Ошибка формата времени! Используйте ЧЧ:ММ.")
+            return
+
+        if deadline_start >= deadline_end:
+            await message.answer("⚠️ Время начала должно быть раньше времени конца!")
+            return
+
+        thread_id = message.message_thread_id if message.is_topic_message else None
+        channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+        if not channel:
+            await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
+            return
+
+        from bot.database.crud import KeywordEventCRUD
+        await KeywordEventCRUD.create(
+            session, channel.id, deadline_start, deadline_end, keyword
+        )
+
+        await message.answer(
+            f"✅ Событие с ключевым словом создано!\n\n"
+            f"🔑 Ключевое слово: <b>{html.quote(keyword)}</b>\n"
+            f"⏰ Отслеживание: с <b>{deadline_start.strftime('%H:%M')}</b> до <b>{deadline_end.strftime('%H:%M')}</b>\n"
+            f"📊 Статистика будет опубликована в <b>{deadline_end.strftime('%H:%M')}</b>\n\n"
+            f"💡 Поддерживаются вариации: {keyword}, {keyword}а, {keyword}о и т.д."
+        )
+    except Exception as e:
+        logger.error(f"Error in add_event_open: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при создании события.")
+
+
+@router.message(Command("add_event_close"))
+async def cmd_add_event_close(message: Message, command: CommandObject, session: AsyncSession):
+    """
+    Событие с ключевым словом (например, "закрыт")
+    Формат: /add_event_close ЧЧ:ММ ЧЧ:ММ "ключевое слово"
+    Пример: /add_event_close 18:00 23:00 "закрыт"
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    if not command.args:
+        await message.answer(
+            "<b>Формат команды:</b>\n"
+            "<code>/add_event_close [начало] [конец] \"ключевое слово\"</code>\n\n"
+            "<b>Пример:</b>\n"
+            "<code>/add_event_close 18:00 23:00 \"закрыт\"</code>\n\n"
+            "Ключевое слово может быть в любом месте сообщения и поддерживает вариации:\n"
+            "закрыт, закрыта, закрыто, закрытие (до 5 символов после базового слова)"
+        )
+        return
+
+    try:
+        parts = shlex.split(command.args)
+        if len(parts) < 3:
+            await message.answer("Недостаточно аргументов. Проверьте формат команды.")
+            return
+
+        start_str = parts[0]
+        end_str = parts[1]
+        keyword = parts[2]
+
+        if len(keyword) > 24:
+            await message.answer("⚠️ Ключевое слово не должно превышать 24 символа.")
+            return
+
+        try:
+            h1, m1 = map(int, start_str.split(':'))
+            deadline_start = time(h1, m1)
+
+            h2, m2 = map(int, end_str.split(':'))
+            deadline_end = time(h2, m2)
+        except:
+            await message.answer("❌ Ошибка формата времени! Используйте ЧЧ:ММ.")
+            return
+
+        if deadline_start >= deadline_end:
+            await message.answer("⚠️ Время начала должно быть раньше времени конца!")
+            return
+
+        thread_id = message.message_thread_id if message.is_topic_message else None
+        channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+        if not channel:
+            await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
+            return
+
+        from bot.database.crud import KeywordEventCRUD
+        await KeywordEventCRUD.create(
+            session, channel.id, deadline_start, deadline_end, keyword
+        )
+
+        await message.answer(
+            f"✅ Событие с ключевым словом создано!\n\n"
+            f"🔑 Ключевое слово: <b>{html.quote(keyword)}</b>\n"
+            f"⏰ Отслеживание: с <b>{deadline_start.strftime('%H:%M')}</b> до <b>{deadline_end.strftime('%H:%M')}</b>\n"
+            f"📊 Статистика будет опубликована в <b>{deadline_end.strftime('%H:%M')}</b>\n\n"
+            f"💡 Поддерживаются вариации: {keyword}, {keyword}а, {keyword}о и т.д."
+        )
+    except Exception as e:
+        logger.error(f"Error in add_event_close: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при создании события.")

@@ -8,7 +8,8 @@ from typing import Optional, List
 
 from bot.database.models import (
     User, Channel, Event, TempEvent, CheckoutEvent,
-    Report, Stats, UserChannel, CheckoutSubmission, CheckoutReport
+    Report, Stats, UserChannel, CheckoutSubmission, CheckoutReport,
+    NoTextEvent, NoTextReport, NoTextDayOff, KeywordEvent, KeywordReport
 )
 from sqlalchemy import select, func, and_, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 ALLOWED_CHECKOUT_KEYWORDS = [
     "элитка", "сигареты", "тихое", "водка", "пиво", "игристое",
     "коктейли", "скоропорт", "сопутка", "вода", "энергетики",
-    "бакалея", "мороженое", "шоколад", "нонфуд", "выходной", "выходная"
+    "бакалея", "мороженое", "шоколад", "нонфуд"
 ]
 
 
@@ -359,8 +360,7 @@ class CheckoutEventCRUD:
             first_deadline_time: time,
             second_keyword: str,
             second_deadline_time: time,
-            min_photos: int = 1,
-            stats_time: Optional[time] = None
+            min_photos: int = 1
     ) -> CheckoutEvent:
         checkout_event = CheckoutEvent(
             channel_id=channel_id,
@@ -369,7 +369,6 @@ class CheckoutEventCRUD:
             second_keyword=second_keyword,
             second_deadline_time=second_deadline_time,
             min_photos=min_photos,
-            stats_time=stats_time,  # Новое поле
             allowed_keywords=json.dumps(ALLOWED_CHECKOUT_KEYWORDS)
         )
         session.add(checkout_event)
@@ -686,3 +685,250 @@ class StatsCRUD:
             }
             for row in result.all()
         ]
+
+
+class NoTextEventCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            channel_id: int,
+            deadline_start: time,
+            deadline_end: time
+    ) -> NoTextEvent:
+        event = NoTextEvent(
+            channel_id=channel_id,
+            deadline_start=deadline_start,
+            deadline_end=deadline_end
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        return event
+
+    @staticmethod
+    async def get_active_by_channel(session: AsyncSession, channel_id: int) -> List[NoTextEvent]:
+        stmt = select(NoTextEvent).where(NoTextEvent.channel_id == channel_id)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def delete(session: AsyncSession, event_id: int):
+        stmt = select(NoTextEvent).where(NoTextEvent.id == event_id)
+        result = await session.execute(stmt)
+        event = result.scalar_one_or_none()
+        if event:
+            await session.delete(event)
+            await session.commit()
+
+
+class NoTextReportCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            user_id: int,
+            notext_event_id: int,
+            message_id: int,
+            is_on_time: bool = True
+    ) -> NoTextReport:
+        report = NoTextReport(
+            user_id=user_id,
+            notext_event_id=notext_event_id,
+            message_id=message_id,
+            is_on_time=is_on_time
+        )
+        session.add(report)
+        await session.commit()
+        await session.refresh(report)
+        return report
+
+    @staticmethod
+    async def get_today_report(
+            session: AsyncSession,
+            user_id: int,
+            notext_event_id: int
+    ) -> Optional[NoTextReport]:
+        today = date.today()
+        stmt = select(NoTextReport).where(
+            and_(
+                NoTextReport.user_id == user_id,
+                NoTextReport.notext_event_id == notext_event_id,
+                NoTextReport.report_date == today
+            )
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_reports_by_event_and_date(
+            session: AsyncSession,
+            notext_event_id: int,
+            report_date: date
+    ) -> List[NoTextReport]:
+        stmt = select(NoTextReport).where(
+            and_(
+                NoTextReport.notext_event_id == notext_event_id,
+                NoTextReport.report_date == report_date
+            )
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class NoTextDayOffCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            user_id: int,
+            notext_event_id: int,
+            day_off_date: date
+    ) -> NoTextDayOff:
+        day_off = NoTextDayOff(
+            user_id=user_id,
+            notext_event_id=notext_event_id,
+            day_off_date=day_off_date
+        )
+        session.add(day_off)
+        await session.commit()
+        await session.refresh(day_off)
+        return day_off
+
+    @staticmethod
+    async def get_today_dayoff(
+            session: AsyncSession,
+            user_id: int,
+            notext_event_id: int
+    ) -> Optional[NoTextDayOff]:
+        today = date.today()
+        stmt = select(NoTextDayOff).where(
+            and_(
+                NoTextDayOff.user_id == user_id,
+                NoTextDayOff.notext_event_id == notext_event_id,
+                NoTextDayOff.day_off_date == today
+            )
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_dayoffs_by_event_and_date(
+            session: AsyncSession,
+            notext_event_id: int,
+            day_off_date: date
+    ) -> List[NoTextDayOff]:
+        stmt = select(NoTextDayOff).where(
+            and_(
+                NoTextDayOff.notext_event_id == notext_event_id,
+                NoTextDayOff.day_off_date == day_off_date
+            )
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class KeywordEventCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            channel_id: int,
+            deadline_start: time,
+            deadline_end: time,
+            keyword: str
+    ) -> KeywordEvent:
+        event = KeywordEvent(
+            channel_id=channel_id,
+            deadline_start=deadline_start,
+            deadline_end=deadline_end,
+            keyword=keyword
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        return event
+
+    @staticmethod
+    async def get_active_by_channel(session: AsyncSession, channel_id: int) -> List[KeywordEvent]:
+        stmt = select(KeywordEvent).where(KeywordEvent.channel_id == channel_id)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def delete(session: AsyncSession, event_id: int):
+        stmt = select(KeywordEvent).where(KeywordEvent.id == event_id)
+        result = await session.execute(stmt)
+        event = result.scalar_one_or_none()
+        if event:
+            await session.delete(event)
+            await session.commit()
+
+
+class KeywordReportCRUD:
+    @staticmethod
+    async def create(
+            session: AsyncSession,
+            user_id: int,
+            keyword_event_id: int,
+            message_id: int,
+            message_text: str,
+            is_on_time: bool = True
+    ) -> KeywordReport:
+        report = KeywordReport(
+            user_id=user_id,
+            keyword_event_id=keyword_event_id,
+            message_id=message_id,
+            message_text=message_text,
+            is_on_time=is_on_time
+        )
+        session.add(report)
+        await session.commit()
+        await session.refresh(report)
+        return report
+
+    @staticmethod
+    async def get_today_report(
+            session: AsyncSession,
+            user_id: int,
+            keyword_event_id: int
+    ) -> Optional[KeywordReport]:
+        today = date.today()
+        stmt = select(KeywordReport).where(
+            and_(
+                KeywordReport.user_id == user_id,
+                KeywordReport.keyword_event_id == keyword_event_id,
+                KeywordReport.report_date == today
+            )
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_reports_by_event_and_date(
+            session: AsyncSession,
+            keyword_event_id: int,
+            report_date: date
+    ) -> List[KeywordReport]:
+        stmt = select(KeywordReport).where(
+            and_(
+                KeywordReport.keyword_event_id == keyword_event_id,
+                KeywordReport.report_date == report_date
+            )
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+def match_keyword_regex(text: str, keyword: str) -> bool:
+    """
+    Проверка текста на соответствие ключевому слову с поддержкой regex
+    Позволяет добавить до 5 любых символов после ключевого слова
+    
+    Args:
+        text: текст сообщения
+        keyword: базовое ключевое слово
+    
+    Returns:
+        bool: найдено ли совпадение
+    """
+    # Создаем паттерн: ключевое слово + до 5 любых букв
+    # Используем \b для границы слова
+    pattern = re.compile(rf'\b{re.escape(keyword)}\w{{0,5}}\b', re.IGNORECASE)
+    return bool(pattern.search(text))

@@ -110,7 +110,7 @@ async def migrate_reports_table():
 
 
 async def create_new_tables():
-    """Создать новые таблицы (user_channels, photo_templates)"""
+    """Создать новые таблицы (user_channels, photo_templates, notext_events, keyword_events)"""
     async with engine.begin() as conn:
         logger.info("Creating new tables...")
 
@@ -138,13 +138,17 @@ async def migrate():
         logger.info("=" * 50)
         logger.info("✅ Migration completed successfully!")
         logger.info("=" * 50)
+        logger.info("\nNew tables created:")
+        logger.info("- notext_events: события без текста")
+        logger.info("- notext_reports: отчеты для notext событий")
+        logger.info("- notext_day_offs: выходные дни для notext событий")
+        logger.info("- keyword_events: события с ключевым словом (open/close)")
+        logger.info("- keyword_reports: отчеты для keyword событий")
         logger.info("\nNext steps:")
         logger.info("1. Restart your bot")
-        logger.info(
-            "2. Use /set_stats_destination in each channel to configure stats location"
-        )
-        logger.info("3. Re-add users with /add_user in each thread")
-        logger.info("4. (Optional) Add photo templates with /add_template")
+        logger.info("2. Use /add_event_notext for photo tracking events")
+        logger.info("3. Use /add_event_open or /add_event_close for keyword events")
+        logger.info("4. Use /rm_event to remove any type of event")
 
     except Exception as e:
         logger.error(f"❌ Migration failed: {e}")

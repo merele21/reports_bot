@@ -496,13 +496,11 @@ class ReportScheduler:
                 logger.error(f"Error cleaning up temp events: {e}", exc_info=True)
 
     async def send_checkout_daily_stats(self):
-        """Отправка ежедневной статистики checkout событий (вызывается каждую минуту)"""
+        """Отправка ежедневной статистики checkout событий в 22:00"""
         async with async_session_maker() as session:
             try:
                 channels = await ChannelCRUD.get_all_active(session)
                 today = date.today()
-                now = datetime.now(pytz.timezone(settings.TZ))
-                current_time = now.time()
 
                 for channel in channels:
                     checkout_events = await CheckoutEventCRUD.get_active_by_channel(
@@ -513,14 +511,9 @@ class ReportScheduler:
                         continue
 
                     for cev in checkout_events:
-                        # Определяем время статистики (индивидуальное или дефолтное 22:00)
-                        stats_time = cev.stats_time if cev.stats_time else dt_time(22, 0)
-                        
-                        # Проверяем, совпадает ли текущее время с временем статистики (с точностью до минуты)
-                        if current_time.hour == stats_time.hour and current_time.minute == stats_time.minute:
-                            await self.send_checkout_stats_for_event(
-                                session, channel, cev, today
-                            )
+                        await self.send_checkout_stats_for_event(
+                            session, channel, cev, today
+                        )
             except Exception as e:
                 logger.error(f"Error sending checkout stats: {e}", exc_info=True)
 
@@ -531,8 +524,7 @@ class ReportScheduler:
         # Категории пользователей
         on_time = []  # Сдали вовремя
         late = []  # Немного опоздали
-        day_off = []  # Выходной
-        not_submitted = []  # Не сдали (с деталями)
+        not_submitted = []  # Не сдали
 
         for user in users:
             submission = await CheckoutSubmissionCRUD.get_today_submission(
@@ -540,13 +532,7 @@ class ReportScheduler:
             )
 
             if not submission:
-                not_submitted.append((user, "не сдал пересчет", None))
-                continue
-
-            # Проверка на выходной
-            submitted_keywords = json.loads(submission.keywords)
-            if "выходной" in submitted_keywords:
-                day_off.append(user)
+                not_submitted.append(user)
                 continue
 
             reports = await CheckoutReportCRUD.get_today_reports(
@@ -554,9 +540,7 @@ class ReportScheduler:
             )
 
             if not reports:
-                # Пересчет сдал, но ни одного фотоотчета нет
-                categories_count = len(submitted_keywords)
-                not_submitted.append((user, f"не сдал отчеты ({categories_count} категорий)", submitted_keywords))
+                not_submitted.append(user)
                 continue
 
             # Проверяем, все ли сдано
@@ -565,9 +549,7 @@ class ReportScheduler:
             )
 
             if remaining:
-                # Частично сдал
-                remaining_count = len(remaining)
-                not_submitted.append((user, f"не сдал {remaining_count} из {len(submitted_keywords)}", remaining))
+                not_submitted.append(user)
                 continue
 
             # Проверяем время сдачи последнего отчета
@@ -575,10 +557,13 @@ class ReportScheduler:
             deadline = datetime.combine(today, checkout_event.second_deadline_time)
             deadline = pytz.timezone(settings.TZ).localize(deadline)
 
-            if last_report.submitted_at.replace(tzinfo=pytz.UTC) <= deadline:
+            # Конвертируем время сдачи в UTC+3 для сравнения
+            submitted_time = last_report.submitted_at.astimezone(pytz.timezone(settings.TZ))
+
+            if submitted_time <= deadline:
                 on_time.append(user)
             else:
-                late.append((user, last_report.submitted_at))
+                late.append((user, submitted_time))
 
         # Формируем статистику
         text = f"📊 <b>Статистика по событию '{checkout_event.first_keyword}'</b>\n\n"
@@ -598,22 +583,11 @@ class ReportScheduler:
                 text += f"{i}. {username} (сдал в {time_str})\n"
             text += "\n"
 
-        if day_off:
-            text += "🏖 <b>Выходной день:</b>\n"
-            for i, u in enumerate(day_off, 1):
+        if not_submitted:
+            text += "❌ <b>До сих пор не сдали отчет (или отчеты):</b>\n"
+            for i, u in enumerate(not_submitted, 1):
                 username = f"@{u.username}" if u.username else u.full_name
                 text += f"{i}. {username}\n"
-            text += "\n"
-
-        if not_submitted:
-            text += "❌ <b>Не сдали отчет вообще или частично:</b>\n"
-            for i, (u, status, missing_categories) in enumerate(not_submitted, 1):
-                username = f"@{u.username}" if u.username else u.full_name
-                if missing_categories and missing_categories != "не сдал пересчет":
-                    categories_str = ", ".join(missing_categories)
-                    text += f"{i}. {username} [{status}] — {categories_str}\n"
-                else:
-                    text += f"{i}. {username} [{status}]\n"
             text += "\n"
             text += "<i>Те, которые указаны в этом списке — жду причину почему, " \
                     "остальным выражаю благодарность за вашу работу!</i>\n"
@@ -633,6 +607,170 @@ class ReportScheduler:
         except Exception as e:
             logger.error(f"Error sending checkout stats: {e}")
 
+    async def check_notext_keyword_events(self):
+        """Проверка и публикация статистики для notext и keyword событий"""
+        async with async_session_maker() as session:
+            try:
+                from bot.database.crud import (
+                    NoTextEventCRUD, NoTextReportCRUD, NoTextDayOffCRUD,
+                    KeywordEventCRUD, KeywordReportCRUD
+                )
+                
+                channels = await ChannelCRUD.get_all_active(session)
+                now = datetime.now(pytz.timezone(settings.TZ))
+                current_time = now.time()
+                today = now.date()
+
+                for channel in channels:
+                    # Проверяем notext события
+                    notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
+                    
+                    for notext_event in notext_events:
+                        # Проверяем, наступило ли время публикации (deadline_end)
+                        deadline_end = notext_event.deadline_end
+                        
+                        # Публикуем в окне +/- 1 минута от deadline_end
+                        time_diff = abs(
+                            (current_time.hour * 60 + current_time.minute) -
+                            (deadline_end.hour * 60 + deadline_end.minute)
+                        )
+                        
+                        if time_diff <= 1:
+                            await self.send_notext_stats(session, channel, notext_event, today)
+                    
+                    # Проверяем keyword события
+                    keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
+                    
+                    for keyword_event in keyword_events:
+                        # Проверяем, наступило ли время публикации (deadline_end)
+                        deadline_end = keyword_event.deadline_end
+                        
+                        time_diff = abs(
+                            (current_time.hour * 60 + current_time.minute) -
+                            (deadline_end.hour * 60 + deadline_end.minute)
+                        )
+                        
+                        if time_diff <= 1:
+                            await self.send_keyword_stats(session, channel, keyword_event, today)
+                            
+            except Exception as e:
+                logger.error(f"Error in check_notext_keyword_events: {e}", exc_info=True)
+
+    async def send_notext_stats(self, session, channel, notext_event, today):
+        """Отправка статистики для notext события"""
+        from bot.database.crud import NoTextReportCRUD, NoTextDayOffCRUD
+        
+        users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        
+        on_time = []  # Сдали вовремя
+        not_submitted = []  # Не сдали
+        day_offs = []  # Выходной
+        
+        for user in users:
+            # Проверяем выходной
+            dayoff = await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id)
+            if dayoff:
+                day_offs.append(user)
+                continue
+            
+            # Проверяем отчет
+            report = await NoTextReportCRUD.get_today_report(session, user.id, notext_event.id)
+            
+            if report:
+                on_time.append(user)
+            else:
+                not_submitted.append(user)
+        
+        # Формируем статистику (только непустые разделы)
+        text = f"📊 <b>Статистика отправки фото</b>\n\n"
+        
+        has_content = False
+        
+        if on_time:
+            has_content = True
+            text += "✅ <b>Сдали вовремя:</b>\n"
+            for u in on_time:
+                username = f"@{u.username}" if u.username else u.full_name
+                text += f"- {username}\n"
+            text += "\n"
+        
+        if not_submitted:
+            has_content = True
+            text += "❌ <b>Не сдали:</b>\n"
+            for u in not_submitted:
+                username = f"@{u.username}" if u.username else u.full_name
+                text += f"- {username}\n"
+            text += "\n"
+        
+        if day_offs:
+            has_content = True
+            text += "🏖 <b>Выходной:</b>\n"
+            for u in day_offs:
+                username = f"@{u.username}" if u.username else u.full_name
+                text += f"- {username}\n"
+        
+        if not has_content:
+            text += "<i>Нет данных для отображения</i>"
+        
+        try:
+            await self.bot.send_message(
+                chat_id=channel.telegram_id,
+                text=text,
+                message_thread_id=channel.thread_id
+            )
+            logger.info(f"NoText stats sent for channel {channel.telegram_id}, event {notext_event.id}")
+        except Exception as e:
+            logger.error(f"Error sending notext stats: {e}")
+
+    async def send_keyword_stats(self, session, channel, keyword_event, today):
+        """Отправка статистики для keyword события"""
+        from bot.database.crud import KeywordReportCRUD
+        
+        users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        
+        on_time = []  # Сдали вовремя
+        not_submitted = []  # Не сдали
+        
+        for user in users:
+            report = await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id)
+            
+            if report:
+                on_time.append(user)
+            else:
+                not_submitted.append(user)
+        
+        # Формируем статистику (только непустые разделы)
+        text = f"📊 <b>Статистика по ключевому слову '{keyword_event.keyword}'</b>\n\n"
+        
+        has_content = False
+        
+        if on_time:
+            has_content = True
+            text += "✅ <b>Сдали вовремя:</b>\n"
+            for u in on_time:
+                username = f"@{u.username}" if u.username else u.full_name
+                text += f"- {username}\n"
+            text += "\n"
+        
+        if not_submitted:
+            has_content = True
+            text += "❌ <b>Не сдали:</b>\n"
+            for u in not_submitted:
+                username = f"@{u.username}" if u.username else u.full_name
+                text += f"- {username}\n"
+        
+        if not has_content:
+            text += "<i>Нет данных для отображения</i>"
+        
+        try:
+            await self.bot.send_message(
+                chat_id=channel.telegram_id,
+                text=text,
+                message_thread_id=channel.thread_id
+            )
+            logger.info(f"Keyword stats sent for channel {channel.telegram_id}, event {keyword_event.id}")
+        except Exception as e:
+            logger.error(f"Error sending keyword stats: {e}")
 
     def _cleanup_old_reminders(self):
         """Очистка кэша напоминаний в начале нового дня"""
@@ -672,11 +810,18 @@ class ReportScheduler:
             id="cleanup_temp_events"
         )
 
-        # Статистика checkout событий (каждую минуту, т.к. время индивидуальное)
+        # Статистика checkout событий в 22:00
         self.scheduler.add_job(
             self.send_checkout_daily_stats,
-            trigger=CronTrigger(minute="*", timezone=settings.TZ),
+            trigger=CronTrigger(hour=22, minute=0, timezone=settings.TZ),
             id="send_checkout_daily_stats"
+        )
+        
+        # Проверка и публикация статистики notext и keyword событий (каждую минуту)
+        self.scheduler.add_job(
+            self.check_notext_keyword_events,
+            trigger=CronTrigger(minute="*", timezone=settings.TZ),
+            id="check_notext_keyword_events"
         )
 
         self.scheduler.start()

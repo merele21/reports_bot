@@ -1,12 +1,14 @@
 import logging
 import json
 from asyncio import sleep
-from datetime import date
+from datetime import date, datetime
+import pytz
 
 from aiogram import Router, F
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.config import settings
 from bot.database.crud import (
     UserCRUD, ChannelCRUD, ReportCRUD, UserChannelCRUD, EventCRUD,
     TempEventCRUD, CheckoutEventCRUD, CheckoutSubmissionCRUD, CheckoutReportCRUD,
@@ -35,12 +37,6 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
         logger.debug(f"Channel not found or inactive for chat {message.chat.id}, thread {thread_id}")
         return
 
-    # Получаем все checkout события для канала
-    checkout_events = await CheckoutEventCRUD.get_active_by_channel(session, channel.id)
-    if not checkout_events:
-        logger.debug(f"No checkout events for channel {channel.id}")
-        return
-
     # Получаем текст из сообщения
     text = message.text or ""
 
@@ -62,6 +58,64 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
     # Проверяем права
     if not await UserChannelCRUD.in_user_in_channel(session, user.id, channel.id):
         logger.debug(f"User {user.id} not in channel {channel.id}")
+        return
+
+    # === ПРОВЕРКА NOTEXT ВЫХОДНЫХ ===
+    from bot.database.crud import NoTextEventCRUD, NoTextDayOffCRUD
+    
+    text_lower = text.lower().strip()
+    
+    # Проверяем на слово "выходной"
+    if "выходной" in text_lower or "выходная" in text_lower:
+        notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
+        
+        for notext_event in notext_events:
+            # Проверяем, не отметил ли пользователь уже выходной
+            existing_dayoff = await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id)
+            if existing_dayoff:
+                await message.reply("✅ Вы уже отметили выходной на сегодня.")
+                return
+            
+            # Сохраняем выходной
+            from datetime import date
+            today = date.today()
+            await NoTextDayOffCRUD.create(session, user.id, notext_event.id, today)
+            
+            await message.reply("✅ Выходной отмечен!")
+            logger.info(f"NoText day off: user={user.telegram_id}, event={notext_event.id}")
+            return
+
+    # === ПРОВЕРКА KEYWORD СОБЫТИЙ ===
+    from bot.database.crud import KeywordEventCRUD, KeywordReportCRUD, match_keyword_regex
+    
+    keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
+    now = datetime.now(pytz.timezone(settings.TZ))
+    current_time = now.time()
+    
+    for keyword_event in keyword_events:
+        # Проверяем, находимся ли мы в окне отслеживания
+        if keyword_event.deadline_start <= current_time <= keyword_event.deadline_end:
+            # Проверяем ключевое слово с regex
+            if match_keyword_regex(text, keyword_event.keyword):
+                # Проверка на повтор
+                if await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id):
+                    await message.reply("❌ Вы уже отправили сообщение с этим ключевым словом сегодня.")
+                    return
+                
+                # Сохраняем отчет
+                await KeywordReportCRUD.create(
+                    session, user.id, keyword_event.id, message.message_id, text, is_on_time=True
+                )
+                
+                await message.reply(f"✅ Сообщение с ключевым словом '{keyword_event.keyword}' принято!")
+                logger.info(f"Keyword event report: user={user.telegram_id}, event={keyword_event.id}")
+                return
+
+    # === ПРОВЕРКА CHECKOUT СОБЫТИЙ ===
+    # Получаем все checkout события для канала
+    checkout_events = await CheckoutEventCRUD.get_active_by_channel(session, channel.id)
+    if not checkout_events:
+        logger.debug(f"No checkout events for channel {channel.id}")
         return
 
     # Ищем подходящее checkout событие по first_keyword
@@ -111,26 +165,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
                 f"Пожалуйста, используйте слова из списка:\n"
                 f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
                 f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-                f"шоколад, нонфуд, выходной"
-            )
-            return
-
-        # ПРОВЕРКА НА ВЫХОДНОЙ (после успешного парсинга)
-        if "выходной" in keywords or "выходная" in keywords:
-            # Сохраняем submission с маркером выходного
-            await CheckoutSubmissionCRUD.create(
-                session, user.id, checkout_event.id, ["выходной"]
-            )
-            
-            await message.reply(
-                f"✅ <b>Выходной день принят!</b>\n\n"
-                f"👤 Сотрудник: <b>@{user.username or user.full_name}</b>\n"
-                f"🏖 Приятного отдыха! Отчеты сегодня не требуются."
-            )
-            
-            logger.info(
-                f"Day off submission: user={user.telegram_id}, "
-                f"event={checkout_event.id}"
+                f"шоколад, нонфуд"
             )
             return
 
@@ -140,16 +175,12 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
         )
 
         keywords_str = ", ".join(keywords)
-        categories_count = len(keywords)
         await message.reply(
-            f"✅ <b>Пересчет успешно принят!</b>\n\n"
-            f"👤 Сотрудник: <b>@{user.username or user.full_name}</b>\n"
-            f"📋 Категорий к отчету: <b>{categories_count}</b>\n"
-            f"🏷 Список: <b>{keywords_str}</b>\n\n"
-            f"⏰ До <b>{checkout_event.second_deadline_time.strftime('%H:%M')}</b> "
-            f"отправьте фотоотчеты по каждой категории с указанием:\n"
-            f"<code>{checkout_event.second_keyword}: [категория]</code>\n\n"
-            f"<i>Не забудьте сдать отчеты по всем указанным категориям!</i>"
+            f"✅ Пересчет принят!\n\n"
+            f"📋 Категории: <b>{keywords_str}</b>\n"
+            f"⏰ До {checkout_event.second_deadline_time.strftime('%H:%M')} "
+            f"отправьте фотоотчеты с указанием:\n"
+            f"<code>{checkout_event.second_keyword}: [категория]</code>"
         )
 
         logger.info(
@@ -353,26 +384,7 @@ async def handle_photo_message(message: Message, session: AsyncSession):
                 f"Пожалуйста, используйте слова из списка:\n"
                 f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
                 f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-                f"шоколад, нонфуд, выходной"
-            )
-            return
-
-        # ПРОВЕРКА НА ВЫХОДНОЙ (после успешного парсинга)
-        if "выходной" in keywords or "выходная" in keywords:
-            # Сохраняем submission с маркером выходного
-            await CheckoutSubmissionCRUD.create(
-                session, user.id, checkout_event.id, ["выходной"]
-            )
-            
-            await message.reply(
-                f"✅ <b>Выходной день принят!</b>\n\n"
-                f"👤 Сотрудник: <b>@{user.username or user.full_name}</b>\n"
-                f"🏖 Приятного отдыха! Отчеты сегодня не требуются."
-            )
-            
-            logger.info(
-                f"Day off submission (with photo): user={user.telegram_id}, "
-                f"event={checkout_event.id}"
+                f"шоколад, нонфуд"
             )
             return
 
@@ -382,16 +394,12 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         )
 
         keywords_str = ", ".join(keywords)
-        categories_count = len(keywords)
         await message.reply(
-            f"✅ <b>Пересчет успешно принят!</b>\n\n"
-            f"👤 Сотрудник: <b>@{user.username or user.full_name}</b>\n"
-            f"📋 Категорий к отчету: <b>{categories_count}</b>\n"
-            f"🏷 Список: <b>{keywords_str}</b>\n\n"
-            f"⏰ До <b>{checkout_event.second_deadline_time.strftime('%H:%M')}</b> "
-            f"отправьте фотоотчеты по каждой категории с указанием:\n"
-            f"<code>{checkout_event.second_keyword}: [категория]</code>\n\n"
-            f"<i>Не забудьте сдать отчеты по всем указанным категориям!</i>"
+            f"✅ Пересчет принят!\n\n"
+            f"📋 Категории: <b>{keywords_str}</b>\n"
+            f"⏰ До {checkout_event.second_deadline_time.strftime('%H:%M')} "
+            f"отправьте фотоотчеты с указанием:\n"
+            f"<code>{checkout_event.second_keyword}: [категория]</code>"
         )
 
         logger.info(
@@ -471,3 +479,32 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         logger.info(f"Temp event report: user={user.telegram_id}, temp_event={temp_event.id}")
         return
+    
+    # === ПРОВЕРКА NOTEXT СОБЫТИЙ ===
+    from bot.database.crud import NoTextEventCRUD, NoTextReportCRUD, NoTextDayOffCRUD
+    
+    notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
+    now = datetime.now(pytz.timezone(settings.TZ))
+    current_time = now.time()
+    
+    for notext_event in notext_events:
+        # Проверяем, находимся ли мы в окне отслеживания
+        if notext_event.deadline_start <= current_time <= notext_event.deadline_end:
+            # Проверяем, не в выходном ли пользователь
+            if await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id):
+                logger.debug(f"User {user.telegram_id} is on day off for notext event {notext_event.id}")
+                return
+            
+            # Проверка на повтор
+            if await NoTextReportCRUD.get_today_report(session, user.id, notext_event.id):
+                await message.reply("❌ Вы уже отправили фото сегодня.")
+                return
+            
+            # Сохраняем отчет (is_on_time будет определен при публикации статистики)
+            await NoTextReportCRUD.create(
+                session, user.id, notext_event.id, message.message_id, is_on_time=True
+            )
+            
+            await message.reply("✅ Фото принято!")
+            logger.info(f"NoText event report: user={user.telegram_id}, event={notext_event.id}")
+            return
