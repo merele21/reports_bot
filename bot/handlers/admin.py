@@ -10,7 +10,7 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 
 from bot.config import settings
@@ -606,16 +606,8 @@ async def cmd_add_event(message: Message, command: CommandObject, session: Async
             await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
             return
 
-        # Обработка фото-шаблона (если есть)
-        photo_bytes, file_id = None, None
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            file = await message.bot.get_file(file_id)
-            photo_file = await message.bot.download_file(file.file_path)
-            photo_bytes = photo_file.read()
-
         # Создаем событие
-        await EventCRUD.create(session, channel.id, keyword, deadline, min_photos, photo_bytes, file_id)
+        await EventCRUD.create(session, channel.id, keyword, deadline, min_photos)
 
         await message.answer(
             f"✅ Событие <b>{html.quote(keyword)}</b> успешно создано.\n\n"
@@ -684,16 +676,9 @@ async def cmd_add_tmp_event(message: Message, command: CommandObject, session: A
             await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
             return
 
-        photo_bytes, file_id = None, None
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            file = await message.bot.get_file(file_id)
-            photo_file = await message.bot.download_file(file.file_path)
-            photo_bytes = photo_file.read()
-
         today = date.today()
         await TempEventCRUD.create(
-            session, channel.id, keyword, deadline, today, min_photos, photo_bytes, file_id
+            session, channel.id, keyword, deadline, today, min_photos
         )
 
         await message.answer(

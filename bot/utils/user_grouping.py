@@ -1,124 +1,114 @@
 """
-Утилиты для работы с группировкой пользователей по display_name
+Утилиты для группировки пользователей по store_id
 """
-from typing import List, Dict, Set
+from typing import List, Dict, Tuple
 from bot.database.models import User
 
 
-def group_users_by_display_name(users: List[User]) -> Dict[str, List[User]]:
+def group_users_by_store(users: List[User]) -> Dict[str, List[User]]:
     """
-    Группирует пользователей по display_name.
-    Пользователи без display_name группируются индивидуально по telegram_id.
-    
+    Группирует пользователей по store_id.
+    Пользователи без store_id группируются индивидуально.
+
     Args:
         users: Список пользователей
-        
+
     Returns:
-        Словарь {ключ_группировки: [список_пользователей]}
+        Словарь {store_id: [список_пользователей]}
+        Для пользователей без store_id: {f"no_store_{telegram_id}": [user]}
+
+    Примеры:
+        {"MSK-001": [user1, user2], "SPB-042": [user3]}
     """
+
     groups = {}
-    
+
     for user in users:
-        # Если есть display_name, группируем по нему
-        if user.display_name:
-            key = f"display:{user.display_name}"
+        if user.store_id:
+            key = user.store_id
         else:
-            # Если нет display_name, каждый пользователь в своей группе
-            key = f"user:{user.telegram_id}"
-        
+            # Пользователи без магазина - каждый сам по себе
+            key = f"no_store_{user.telegram_id}"
+
         if key not in groups:
             groups[key] = []
         groups[key].append(user)
-    
+
     return groups
 
 
-def get_display_name_for_user(user: User) -> str:
+def format_store_mention(store_id: str, users: List[User]) -> str:
     """
-    Возвращает отображаемое имя пользователя для отчетов.
-    
+    Форматирует упоминание магазина для отчетов.
+
     Args:
-        user: Объект пользователя
-        
+        store_id: ID магазина или "no_store_XXX"
+        users: Список пользователей этого магазина
+
     Returns:
-        Строка для отображения (display_name или full_name)
+        "MSK-001" - для магазинов
+        "@username" или "Иван Иванов" - для пользователей без магазина
+
+    Примеры:
+        format_store_mention("MSK-001", [user1, user2]) → "MSK-001"
+        format_store_mention("no_store_123", [user]) → "@ivan" или "Иван"
     """
-    if user.display_name:
-        return user.display_name
-    return user.full_name
+
+    if store_id.startswith("no_store_"):
+        # Это пользователь без магазина
+        user = users[0]
+        if user.username:
+            return f"@{user.username}"
+        return user.full_name or f"ID:{user.telegram_id}"
+
+    # Это магазин
+    return store_id
 
 
-def format_user_mention(user: User) -> str:
+def get_store_users_list(users: List[User]) -> str:
     """
-    Форматирует упоминание пользователя для сообщений.
-    
-    Args:
-        user: Объект пользователя
-        
-    Returns:
-        Строка с упоминанием (@username или имя)
-    """
-    if user.username:
-        return f"@{user.username}"
-    
-    if user.display_name:
-        return user.display_name
-    
-    return user.full_name
+    Возвращает список пользователей магазина через запятую.
 
-
-def get_unique_display_names(users: List[User]) -> Set[str]:
-    """
-    Возвращает уникальные display_name из списка пользователей.
-    
     Args:
         users: Список пользователей
-        
-    Returns:
-        Множество уникальных display_name
-    """
-    return {user.display_name for user in users if user.display_name}
 
-
-def filter_one_user_per_display_name(users: List[User]) -> List[User]:
-    """
-    Фильтрует список пользователей, оставляя только по одному представителю
-    для каждого display_name. Пользователи без display_name остаются все.
-    
-    Args:
-        users: Список пользователей
-        
     Returns:
-        Отфильтрованный список пользователей
+        Строка вида "@user1, @user2, Иван Иванов"
+
+    Примеры:
+        get_store_users_list([user1, user2]) → "@ivan, @petr"
     """
-    seen_display_names = set()
-    result = []
-    
+
+    mentions = []
     for user in users:
-        if user.display_name:
-            if user.display_name not in seen_display_names:
-                seen_display_names.add(user.display_name)
-                result.append(user)
+        if user.username:
+            mentions.append(f"@{user.username}")
         else:
-            # Пользователей без display_name добавляем всех
-            result.append(user)
-    
-    return result
+            mentions.append(user.full_name or f"ID:{user.telegram_id}")
+
+    return ", ".join(mentions)
 
 
-def has_any_account_submitted(users_in_group: List[User], check_func) -> bool:
+def has_store_submitted_report(
+    store_users: List[User],
+    reports_dict: Dict[int, bool]
+) -> bool:
     """
-    Проверяет, сдал ли хотя бы один аккаунт из группы отчет.
-    
+    Проверяет, сдал ли хотя бы один пользователь магазина отчет.
+
     Args:
-        users_in_group: Список пользователей в группе (с одинаковым display_name)
-        check_func: Async функция проверки (принимает user.id, возвращает bool/object)
-        
+        store_users: Список пользователей магазина
+        reports_dict: Словарь {user_id: has_report}
+
     Returns:
-        True если хотя бы один аккаунт сдал отчет
-        
-    Note:
-        Это синхронная обертка, реальная проверка должна быть в async коде
+        True если хотя бы один пользователь магазина сдал отчет
+
+    Примеры:
+        has_store_submitted_report([user1, user2], {1: True, 2: False}) → True
+        has_store_submitted_report([user1, user2], {1: False, 2: False}) → False
     """
-    # Эта функция будет использоваться как концепция в async коде
-    pass
+
+    for user in store_users:
+        if reports_dict.get(user.id, False):
+            return True
+    return False

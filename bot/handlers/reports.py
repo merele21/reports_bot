@@ -425,29 +425,14 @@ async def handle_photo_message(message: Message, session: AsyncSession):
             # TODO: Реализовать проверку медиагруппы (как в оригинале)
             pass
 
-        # Проверка шаблона
-        template_validated = False
-        photo_obj = message.photo[-1]
-        file = await message.bot.get_file(photo_obj.file_id)
-        photo_data = await message.bot.download_file(file.file_path)
-
-        valid, err = await EventCRUD.validate_photo(session, event.id, photo_data.read())
-        if not valid:
-            await message.reply(f"⚠️ Ошибка шаблона: {err}")
-            return
-
-        template_validated = True
-
         # Сохраняем отчет
         await ReportCRUD.create(
             session, user.id, channel.id, event_id=event.id,
             message_id=message.message_id, photos_count=1,
-            message_text=caption, is_valid=True,
-            template_validated=template_validated
+            message_text=caption, is_valid=True
         )
 
-        check_mark = "✅" if template_validated else "⚠️"
-        await message.reply(f"✅ Отчет '{event.keyword}' принят! {check_mark}")
+        await message.reply(f"✅ Отчет '{event.keyword}' принят!")
 
         logger.info(f"Event report: user={user.telegram_id}, event={event.id}")
         return

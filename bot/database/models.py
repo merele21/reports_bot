@@ -22,6 +22,9 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        Index('ix_users_store_id', 'store_id'),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
@@ -56,12 +59,6 @@ class User(Base):
     keyword_reports: Mapped[list["KeywordReport"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-
-    # Индекс для быстрого поиска по store_id
-    __table_args__ = (
-        Index('ix_users_store_id', 'store_id'),
-    )
-
 
 class Channel(Base):
     """Канал теперь выступает только как контейнер/группа"""
@@ -117,16 +114,9 @@ class Event(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
-
     keyword: Mapped[str] = mapped_column(String(100))  # Ключевое слово для поиска
     deadline_time: Mapped[dt_time] = mapped_column(Time)  # Время дедлайна
     min_photos: Mapped[int] = mapped_column(Integer, default=1)
-
-    # Шаблон фото
-    template_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    template_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # MD5
-    template_phash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # Perceptual Hash
-
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships

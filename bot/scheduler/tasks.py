@@ -1,6 +1,8 @@
 import logging
 import json
 from datetime import datetime, timedelta, date, time as dt_time
+from typing import List, Tuple
+
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,10 +13,12 @@ from bot.database.crud import (
     TempEventCRUD, CheckoutEventCRUD, CheckoutSubmissionCRUD, CheckoutReportCRUD
 )
 from bot.database.engine import async_session_maker
+from bot.database.models import User
 from bot.utils.user_grouping import (
-    group_users_by_display_name,
-    filter_one_user_per_display_name,
-    format_user_mention
+    group_users_by_store,
+    format_store_mention,
+    get_store_users_list,
+    has_store_submitted_report
 )
 
 logger = logging.getLogger(__name__)
@@ -56,28 +60,28 @@ class ReportScheduler:
                             if key in self.warnings_sent_today:
                                 continue
 
-                            # Группируем пользователей по display_name
-                            user_groups = group_users_by_display_name(users)
-                            
-                            debtors = []
-                            for group_key, group_users in user_groups.items():
-                                # Проверяем, сдал ли ХОТЯ БЫ ОДИН аккаунт из группы
-                                group_has_report = False
-                                for u in group_users:
+                            # Группируем по магазинам
+                            store_groups = group_users_by_store(users)
+
+                            # Проверяем какие магазины не сдали
+                            stores_without_report = []
+                            for store_id, store_users in store_groups.items():
+                                # Проверяем хотя бы одного пользователя из магазина
+                                store_has_report = False
+                                for u in store_users:
                                     report = await ReportCRUD.get_today_report(
                                         session, u.id, ch.id, event_id=ev.id
                                     )
                                     if report:
-                                        group_has_report = True
+                                        store_has_report = True
                                         break
-                                
-                                # Если НИ ОДИН аккаунт из группы не сдал - добавляем первого представителя
-                                if not group_has_report:
-                                    debtors.append(group_users[0])
 
-                            if debtors:
+                                if not store_has_report:
+                                    stores_without_report.append((store_id, store_users))
+
+                            if stores_without_report:
                                 await self.send_warning_message(
-                                    debtors, ch, ev.keyword, ev.deadline_time,
+                                    stores_without_report, ch, ev.keyword, ev.deadline_time,
                                     ev.min_photos, warning_minutes
                                 )
                                 self.warnings_sent_today.add(key)
@@ -98,25 +102,25 @@ class ReportScheduler:
                             if key in self.warnings_sent_today:
                                 continue
 
-                            user_groups = group_users_by_display_name(users)
-                            
-                            debtors = []
-                            for group_key, group_users in user_groups.items():
-                                group_has_report = False
-                                for u in group_users:
+                            store_groups = group_users_by_store(users)
+
+                            stores_without_report = []
+                            for store_id, store_users in store_groups.items():
+                                store_has_report = False
+                                for u in store_users:
                                     report = await ReportCRUD.get_today_report(
                                         session, u.id, ch.id, temp_event_id=tev.id
                                     )
                                     if report:
-                                        group_has_report = True
+                                        store_has_report = True
                                         break
-                                
-                                if not group_has_report:
-                                    debtors.append(group_users[0])
 
-                            if debtors:
+                                if not store_has_report:
+                                    stores_without_report.append((store_id, store_users))
+
+                            if stores_without_report:
                                 await self.send_warning_message(
-                                    debtors, ch, tev.keyword, tev.deadline_time,
+                                    stores_without_report, ch, tev.keyword, tev.deadline_time,
                                     tev.min_photos, warning_minutes, is_temp=True
                                 )
                                 self.warnings_sent_today.add(key)
@@ -128,17 +132,32 @@ class ReportScheduler:
                 logger.error(f"Error in deadline warnings check: {e}", exc_info=True)
 
     async def send_warning_message(
-            self, debtors, channel, keyword, deadline_time, min_photos,
-            minutes_left, is_temp=False
+            self,
+            stores_without_report: List[Tuple[str, List[User]]],
+            channel,
+            keyword,
+            deadline_time,
+            min_photos,
+            minutes_left,
+            is_temp=False
     ):
-        """Отправка предупреждения о приближении дедлайна"""
-        # Фильтруем должников - оставляем только одного представителя на display_name
-        unique_debtors = filter_one_user_per_display_name(debtors)
-        
-        debt_list = [
-            f"{i}. {format_user_mention(u)}"
-            for i, u in enumerate(unique_debtors, 1)
-        ]
+        """
+        Отправка предупреждения о приближении дедлайна.
+
+        Args:
+            stores_without_report: Список кортежей (store_id, [пользователи])
+            channel: Канал для отправки
+            keyword: Ключевое слово события
+            deadline_time: Время дедлайна
+            min_photos: Минимум фото
+            minutes_left: Минут до дедлайна
+            is_temp: Временное ли событие
+        """
+        # Формируем список магазинов
+        store_list = []
+        for i, (store_id, store_users) in enumerate(stores_without_report, 1):
+            store_mention = format_store_mention(store_id, store_users)
+            store_list.append(f"{i}. {store_mention}")
 
         event_type = "⏱ Временный отчет" if is_temp else "📋 Отчет"
 
@@ -148,8 +167,8 @@ class ReportScheduler:
                 f"🔑 Ключевое слово: <code>{keyword}</code>\n"
                 f"⏰ Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n"
                 f"📸 Минимум фото: <b>{min_photos}</b>\n\n"
-                f"<b>Еще не сдали отчет:</b>\n" + "\n".join(debt_list) + "\n\n"
-                                                                         f"⏱ Поторопитесь, времени мало!"
+                f"<b>Еще не сдали отчет:</b>\n" + "\n".join(store_list) + "\n\n"
+                f"⏱ Поторопитесь, времени мало!"
         )
 
         try:
@@ -160,7 +179,7 @@ class ReportScheduler:
             )
             logger.info(
                 f"Warning sent: channel={channel.telegram_id}, "
-                f"keyword={keyword}, users={len(debtors)}"
+                f"keyword={keyword}, stores={len(stores_without_report)}"
             )
         except Exception as e:
             logger.error(f"Failed to send warning: {e}", exc_info=True)
@@ -179,25 +198,25 @@ class ReportScheduler:
             if first_warning_time <= now < first_warning_time + timedelta(minutes=1):
                 key = (channel.id, 'checkout_first_warning', cev.id, today)
                 if key not in self.warnings_sent_today:
-                    user_groups = group_users_by_display_name(users)
-                    
-                    debtors = []
-                    for group_key, group_users in user_groups.items():
-                        group_has_submission = False
-                        for u in group_users:
+                    store_groups = group_users_by_store(users)
+
+                    stores_without_submission = []
+                    for store_id, store_users in store_groups.items():
+                        store_has_submission = False
+                        for u in store_users:
                             submission = await CheckoutSubmissionCRUD.get_today_submission(
                                 session, u.id, cev.id
                             )
                             if submission:
-                                group_has_submission = True
+                                store_has_submission = True
                                 break
-                        
-                        if not group_has_submission:
-                            debtors.append(group_users[0])
 
-                    if debtors:
+                        if not store_has_submission:
+                            stores_without_submission.append((store_id, store_users))
+
+                    if stores_without_submission:
                         await self.send_checkout_first_warning(
-                            debtors, channel, cev.first_keyword, 
+                            stores_without_submission, channel, cev.first_keyword,
                             cev.first_deadline_time, warning_minutes
                         )
                         self.warnings_sent_today.add(key)
@@ -211,66 +230,68 @@ class ReportScheduler:
             if second_warning_time <= now < second_warning_time + timedelta(minutes=1):
                 key = (channel.id, 'checkout_second_warning', cev.id, today)
                 if key not in self.warnings_sent_today:
-                    user_groups = group_users_by_display_name(users)
-                    
-                    incomplete_users = []
-                    for group_key, group_users in user_groups.items():
-                        # Проверяем каждый аккаунт в группе
-                        group_incomplete = True
-                        group_remaining = None
-                        representative = None
-                        
-                        for u in group_users:
+                    store_groups = group_users_by_store(users)
+
+                    incomplete_stores = []
+                    for store_id, store_users in store_groups.items():
+                        # Проверяем ВЕСЬ магазин
+                        store_incomplete = True
+                        store_remaining = None
+
+                        for u in store_users:
                             submission = await CheckoutSubmissionCRUD.get_today_submission(
                                 session, u.id, cev.id
                             )
                             if not submission:
                                 continue
-                            
+
                             remaining = await CheckoutReportCRUD.get_remaining_keywords(
                                 session, u.id, cev.id
                             )
-                            
-                            # Если хотя бы один аккаунт сдал все - группа полностью выполнила
-                            if not remaining:
-                                group_incomplete = False
-                                break
-                            
-                            # Запоминаем оставшиеся ключи и представителя
-                            if representative is None:
-                                representative = u
-                                group_remaining = remaining
-                        
-                        # Добавляем группу в список только если НИ ОДИН аккаунт не сдал все
-                        if group_incomplete and representative and group_remaining:
-                            incomplete_users.append((representative, group_remaining))
 
-                    if incomplete_users:
+                            # Если хотя бы один пользователь сдал все - магазин выполнил
+                            if not remaining:
+                                store_incomplete = False
+                                break
+
+                            # Запоминаем оставшиеся ключи
+                            if store_remaining is None:
+                                store_remaining = remaining
+
+                        # Добавляем магазин только если НИ ОДИН пользователь не сдал все
+                        if store_incomplete and store_remaining:
+                            incomplete_stores.append((store_id, store_users, store_remaining))
+
+                    if incomplete_stores:
                         await self.send_checkout_second_warning(
-                            incomplete_users, channel, cev.second_keyword,
+                            incomplete_stores, channel, cev.second_keyword,
                             cev.second_deadline_time, warning_minutes
                         )
                         self.warnings_sent_today.add(key)
 
     async def send_checkout_first_warning(
-            self, debtors, channel, keyword, deadline_time, minutes_left
+            self,
+            stores_without_submission: List[Tuple[str, List[User]]],
+            channel,
+            keyword,
+            deadline_time,
+            minutes_left
     ):
         """Предупреждение о первом дедлайне checkout события"""
-        unique_debtors = filter_one_user_per_display_name(debtors)
-        
-        debt_list = [
-            f"{i}. {format_user_mention(u)}"
-            for i, u in enumerate(unique_debtors, 1)
-        ]
+
+        store_list = []
+        for i, (store_id, store_users) in enumerate(stores_without_submission, 1):
+            store_mention = format_store_mention(store_id, store_users)
+            store_list.append(f"{i}. {store_mention}")
 
         text = (
-            f"⚠️ <b>ВНИМАНИЕ! До дедлайна осталось {minutes_left} минут!</b> ⚠️\n\n"
-            f"1️⃣ Первый этап: <b>{channel.title}</b>\n"
-            f"🔑 Ключевое слово: <code>{keyword}</code>\n"
-            f"⏰ Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
-            f"<b>Еще не отправили пересчет:</b>\n" + "\n".join(debt_list) + "\n\n"
-            f"<i>Формат: {keyword}: скоропорт + тихое + бакалея</i>\n"
-            f"⏱ Поторопитесь, времени мало!"
+                f"⚠️ <b>ВНИМАНИЕ! До дедлайна осталось {minutes_left} минут!</b> ⚠️\n\n"
+                f"1️⃣ Первый этап: <b>{channel.title}</b>\n"
+                f"🔑 Ключевое слово: <code>{keyword}</code>\n"
+                f"⏰ Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
+                f"<b>Еще не отправили отчет:</b>\n" + "\n".join(store_list) + "\n\n"
+                f"<i>Формат: {keyword}: скоропорт + тихое + бакалея</i>\n"
+                f"⏱ Поторопитесь, времени мало!"
         )
 
         try:
@@ -281,35 +302,34 @@ class ReportScheduler:
             )
             logger.info(
                 f"Checkout first warning sent: channel={channel.telegram_id}, "
-                f"keyword={keyword}, users={len(debtors)}"
+                f"keyword={keyword}, stores={len(stores_without_submission)}"
             )
         except Exception as e:
             logger.error(f"Failed to send checkout first warning: {e}", exc_info=True)
 
     async def send_checkout_second_warning(
-            self, incomplete_users, channel, keyword, deadline_time, minutes_left
+            self,
+            incomplete_stores: List[Tuple[str, List[User], List[str]]],
+            channel,
+            keyword,
+            deadline_time,
+            minutes_left
     ):
         """Предупреждение о втором дедлайне checkout события"""
-        # Группируем пользователей по display_name
-        grouped = {}
-        for u, remaining in incomplete_users:
-            key = u.display_name if u.display_name else f"unique_{u.telegram_id}"
-            if key not in grouped:
-                grouped[key] = (u, remaining)  # Берем первого представителя группы
 
-        debt_list = []
-        for i, (u, remaining) in enumerate(grouped.values(), 1):
-            username = format_user_mention(u)
+        store_list = []
+        for i, (store_id, store_users, remaining) in enumerate(incomplete_stores, 1):
+            store_mention = format_store_mention(store_id, store_users)
             remaining_str = ", ".join(remaining)
-            debt_list.append(f"{i}. {username} — осталось: {remaining_str}")
+            store_list.append(f"{i}. {store_mention} — осталось: {remaining_str}")
 
         text = (
-            f"⚠️ <b>ВНИМАНИЕ! До дедлайна осталось {minutes_left} минут!</b> ⚠️\n\n"
-            f"2️⃣ Второй этап: <b>{channel.title}</b>\n"
-            f"🔑 Ключевое слово: <code>{keyword}</code>\n"
-            f"⏰ Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
-            f"<b>Не сдали все фотоотчеты:</b>\n" + "\n".join(debt_list) + "\n\n"
-            f"⏱ Поторопитесь, времени мало!"
+                f"⚠️ <b>ВНИМАНИЕ! До дедлайна осталось {minutes_left} минут!</b> ⚠️\n\n"
+                f"2️⃣ Второй этап: <b>{channel.title}</b>\n"
+                f"🔑 Ключевое слово: <code>{keyword}</code>\n"
+                f"⏰ Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
+                f"<b>Не сдали отчеты:</b>\n" + "\n".join(store_list) + "\n\n"
+                f"⏱ Поторопитесь, времени мало!"
         )
 
         try:
@@ -320,7 +340,7 @@ class ReportScheduler:
             )
             logger.info(
                 f"Checkout second warning sent: channel={channel.telegram_id}, "
-                f"keyword={keyword}, users={len(incomplete_users)}"
+                f"keyword={keyword}, stores={len(incomplete_stores)}"
             )
         except Exception as e:
             logger.error(f"Failed to send checkout second warning: {e}", exc_info=True)
@@ -355,24 +375,27 @@ class ReportScheduler:
                             if key in self.reminders_sent_today:
                                 continue
 
-                            user_groups = group_users_by_display_name(users)
-                            
-                            debtors = []
-                            for group_key, group_users in user_groups.items():
-                                group_has_report = False
-                                for u in group_users:
-                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, event_id=ev.id):
-                                        group_has_report = True
-                                        break
-                                if not group_has_report:
-                                    debtors.append(group_users[0])
+                            store_groups = group_users_by_store(users)
 
-                            if debtors:
+                            stores_without_report = []
+                            for store_id, store_users in store_groups.items():
+                                store_has_report = False
+                                for u in store_users:
+                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, event_id=ev.id):
+                                        store_has_report = True
+                                        break
+
+                                if not store_has_report:
+                                    stores_without_report.append((store_id, store_users))
+
+                            if stores_without_report:
                                 await self.send_group_reminder(
-                                    debtors, ch, ev.keyword, ev.deadline_time
+                                    stores_without_report, ch, ev.keyword, ev.deadline_time
                                 )
-                                for d in debtors:
-                                    await StatsCRUD.add_reminder(session, d.id, ch.id)
+                                # Добавляем статистику для ВСЕХ пользователей магазина
+                                for _, store_users in stores_without_report:
+                                    for u in store_users:
+                                        await StatsCRUD.add_reminder(session, u.id, ch.id)
                                 self.reminders_sent_today.add(key)
 
                     # === ВРЕМЕННЫЕ СОБЫТИЯ ===
@@ -393,25 +416,27 @@ class ReportScheduler:
                             if key in self.reminders_sent_today:
                                 continue
 
-                            user_groups = group_users_by_display_name(users)
-                            
-                            debtors = []
-                            for group_key, group_users in user_groups.items():
-                                group_has_report = False
-                                for u in group_users:
-                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, temp_event_id=tev.id):
-                                        group_has_report = True
-                                        break
-                                if not group_has_report:
-                                    debtors.append(group_users[0])
+                            store_groups = group_users_by_store(users)
 
-                            if debtors:
+                            stores_without_report = []
+                            for store_id, store_users in store_groups.items():
+                                store_has_report = False
+                                for u in store_users:
+                                    if await ReportCRUD.get_today_report(session, u.id, ch.id, temp_event_id=tev.id):
+                                        store_has_report = True
+                                        break
+
+                                if not store_has_report:
+                                    stores_without_report.append((store_id, store_users))
+
+                            if stores_without_report:
                                 await self.send_group_reminder(
-                                    debtors, ch, tev.keyword, tev.deadline_time,
+                                    stores_without_report, ch, tev.keyword, tev.deadline_time,
                                     is_temp=True
                                 )
-                                for d in debtors:
-                                    await StatsCRUD.add_reminder(session, d.id, ch.id)
+                                for _, store_users in stores_without_report:
+                                    for u in store_users:
+                                        await StatsCRUD.add_reminder(session, u.id, ch.id)
                                 self.reminders_sent_today.add(key)
 
                     # === CHECKOUT СОБЫТИЯ ===
@@ -435,27 +460,29 @@ class ReportScheduler:
             if first_reminder_start <= now <= first_reminder_end:
                 key = (channel.id, 'checkout_first', cev.id, today)
                 if key not in self.checkout_reminders_sent:
-                    user_groups = group_users_by_display_name(users)
-                    
-                    debtors = []
-                    for group_key, group_users in user_groups.items():
-                        group_has_submission = False
-                        for u in group_users:
+                    store_groups = group_users_by_store(users)
+
+                    stores_without_submission = []
+                    for store_id, store_users in store_groups.items():
+                        store_has_submission = False
+                        for u in store_users:
                             submission = await CheckoutSubmissionCRUD.get_today_submission(
                                 session, u.id, cev.id
                             )
                             if submission:
-                                group_has_submission = True
+                                store_has_submission = True
                                 break
-                        if not group_has_submission:
-                            debtors.append(group_users[0])
 
-                    if debtors:
+                        if not store_has_submission:
+                            stores_without_submission.append((store_id, store_users))
+
+                    if stores_without_submission:
                         await self.send_checkout_first_reminder(
-                            debtors, channel, cev.first_keyword, cev.first_deadline_time
+                            stores_without_submission, channel, cev.first_keyword, cev.first_deadline_time
                         )
-                        for d in debtors:
-                            await StatsCRUD.add_reminder(session, d.id, channel.id)
+                        for _, store_users in stores_without_submission:
+                            for u in store_users:
+                                await StatsCRUD.add_reminder(session, u.id, channel.id)
                         self.checkout_reminders_sent.add(key)
 
             # Второй дедлайн (фотоотчеты)
@@ -469,54 +496,58 @@ class ReportScheduler:
                 key = (channel.id, 'checkout_second', cev.id, today)
                 if key not in self.checkout_reminders_sent:
                     # Находим тех, кто не сдал все фотоотчеты
-                    user_groups = group_users_by_display_name(users)
-                    
-                    incomplete_users = []
-                    for group_key, group_users in user_groups.items():
-                        group_incomplete = True
-                        group_remaining = None
-                        representative = None
-                        
-                        for u in group_users:
+                    store_groups = group_users_by_store(users)
+
+                    incomplete_stores = []
+                    for store_id, store_users in store_groups.items():
+                        store_incomplete = True
+                        store_remaining = None
+
+                        for u in store_users:
                             remaining = await CheckoutReportCRUD.get_remaining_keywords(
                                 session, u.id, cev.id
                             )
-                            
-                            if not remaining:
-                                group_incomplete = False
-                                break
-                            
-                            if representative is None:
-                                representative = u
-                                group_remaining = remaining
-                        
-                        if group_incomplete and representative and group_remaining:
-                            incomplete_users.append((representative, group_remaining))
 
-                    if incomplete_users:
+                            if not remaining:
+                                store_incomplete = False
+                                break
+
+                            if store_remaining is None:
+                                store_remaining = remaining
+
+                        if store_incomplete and store_remaining:
+                            incomplete_stores.append((store_id, store_users, store_remaining))
+
+                    if incomplete_stores:
                         await self.send_checkout_second_reminder(
-                            incomplete_users, channel, cev.second_keyword, cev.second_deadline_time
+                            incomplete_stores, channel, cev.second_keyword, cev.second_deadline_time
                         )
-                        for u, _ in incomplete_users:
-                            await StatsCRUD.add_reminder(session, u.id, channel.id)
+                        for _, store_users, _ in incomplete_stores:
+                            for u in store_users:
+                                await StatsCRUD.add_reminder(session, u.id, channel.id)
                         self.checkout_reminders_sent.add(key)
 
-    async def send_checkout_first_reminder(self, debtors, channel, keyword, deadline_time):
+    async def send_checkout_first_reminder(
+            self,
+            stores_without_submission: List[Tuple[str, List[User]]],
+            channel,
+            keyword,
+            deadline_time
+    ):
         """Напоминание о первом этапе checkout"""
-        unique_debtors = filter_one_user_per_display_name(debtors)
-        
-        debt_list = [
-            f"{i}. {format_user_mention(u)}"
-            for i, u in enumerate(unique_debtors, 1)
-        ]
+
+        store_list = []
+        for i, (store_id, store_users) in enumerate(stores_without_submission, 1):
+            store_mention = format_store_mention(store_id, store_users)
+            store_list.append(f"{i}. {store_mention}")
 
         text = (
-                f"🔴 <b>Напоминаю о необходимости отправить пересчет!</b>\n\n"
+                f"🔴 <b>Напоминаю о необходимости отправить отчет!</b>\n\n"
                 f"Канал: <b>{channel.title}</b>\n"
                 f"Ключевое слово: <code>{keyword}</code>\n"
                 f"Дедлайн был: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
-                f"<b>Не отправили пересчет:</b>\n" + "\n".join(debt_list) + "\n\n"
-                                                                            f"<i>Формат: {keyword}: скоропорт + тихое + бакалея</i>"
+                f"<b>Не отправили отчет:</b>\n" + "\n".join(store_list) + "\n\n"
+                f"<i>Формат: {keyword}: скоропорт + тихое + бакалея</i>"
         )
 
         try:
@@ -529,27 +560,26 @@ class ReportScheduler:
             logger.error(f"Failed to send checkout first reminder: {e}")
 
     async def send_checkout_second_reminder(
-            self, incomplete_users, channel, keyword, deadline_time
+            self,
+            incomplete_stores: List[Tuple[str, List[User], List[str]]],
+            channel,
+            keyword,
+            deadline_time
     ):
         """Напоминание о втором этапе checkout"""
-        grouped = {}
-        for u, remaining in incomplete_users:
-            key = u.display_name if u.display_name else f"unique_{u.telegram_id}"
-            if key not in grouped:
-                grouped[key] = (u, remaining)
 
-        debt_list = []
-        for i, (u, remaining) in enumerate(grouped.values(), 1):
-            username = format_user_mention(u)
+        store_list = []
+        for i, (store_id, store_users, remaining) in enumerate(incomplete_stores, 1):
+            store_mention = format_store_mention(store_id, store_users)
             remaining_str = ", ".join(remaining)
-            debt_list.append(f"{i}. {username} — осталось: {remaining_str}")
+            store_list.append(f"{i}. {store_mention} — осталось: {remaining_str}")
 
         text = (
-                f"🔴 <b>Напоминаю о необходимости сдать фотоотчеты!</b>\n\n"
+                f"🔴 <b>Напоминаю о необходимости сдать отчеты!</b>\n\n"
                 f"Канал: <b>{channel.title}</b>\n"
                 f"Ключевое слово: <code>{keyword}</code>\n"
                 f"Дедлайн был: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
-                f"<b>Не сдали все отчеты:</b>\n" + "\n".join(debt_list)
+                f"<b>Не сдали все отчеты:</b>\n" + "\n".join(store_list)
         )
 
         try:
@@ -562,15 +592,19 @@ class ReportScheduler:
             logger.error(f"Failed to send checkout second reminder: {e}")
 
     async def send_group_reminder(
-            self, debtors, channel, keyword, deadline_time, is_temp=False
+            self,
+            stores_without_report: List[Tuple[str, List[User]]],
+            channel,
+            keyword,
+            deadline_time,
+            is_temp=False
     ):
         """Отправка напоминания ПОСЛЕ дедлайна"""
-        unique_debtors = filter_one_user_per_display_name(debtors)
-        
-        debt_list = [
-            f"{i}. {format_user_mention(u)}"
-            for i, u in enumerate(unique_debtors, 1)
-        ]
+
+        store_list = []
+        for i, (store_id, store_users) in enumerate(stores_without_report, 1):
+            store_mention = format_store_mention(store_id, store_users)
+            store_list.append(f"{i}. {store_mention}")
 
         event_type = "⏱ Временный отчет" if is_temp else "📋 Отчет"
 
@@ -579,7 +613,7 @@ class ReportScheduler:
                 f"{event_type}: <b>{channel.title}</b>\n"
                 f"Ключевое слово: <code>{keyword}</code>\n"
                 f"Дедлайн: <b>{deadline_time.strftime('%H:%M')}</b>\n\n"
-                f"<b>Список тех, кто до сих пор не сдал:</b>\n" + "\n".join(debt_list)
+                f"<b>Список тех, кто до сих пор не сдал:</b>\n" + "\n".join(store_list)
         )
 
         try:
@@ -625,28 +659,32 @@ class ReportScheduler:
                 logger.error(f"Error sending checkout stats: {e}", exc_info=True)
 
     async def send_checkout_stats_for_event(self, session, channel, checkout_event, today):
-        """Отправка статистики для конкретного checkout события"""
+        """
+        Отправка статистики для конкретного checkout события.
+        Группировка по магазинам (store_id).
+        """
         users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        store_groups = group_users_by_store(users)
 
-        # Категории пользователей
-        on_time = []  # Сдали вовремя
-        late = []  # Немного опоздали
-        not_submitted = []  # Не сдали
+        # Категории статистики по магазинам
+        on_time_stores = []  # [(store_id, users)]
+        late_stores = []  # [(store_id, users, datetime)]
+        partial_stores = []  # [(store_id, users, submitted_count, total_count)]
+        not_submitted_stores = []  # [(store_id, users)]
 
-        user_groups = group_users_by_display_name(users)
+        for store_id, store_users in store_groups.items():
+            # Проверяем ВЕСЬ магазин (все аккаунты пользователей)
+            store_status = None  # 'on_time', 'late', 'partial', 'not_submitted'
+            latest_submission = None
+            partial_info = None
 
-        for group_key, group_users in user_groups.items():
-            # Проверяем все аккаунты в группе
-            group_status = None  # None, 'on_time', 'late', 'not_submitted'
-            group_representative = group_users[0]
-            latest_submission_time = None
-            
-            for user in group_users:
+            for user in store_users:
                 submission = await CheckoutSubmissionCRUD.get_today_submission(
                     session, user.id, checkout_event.id
                 )
 
                 if not submission:
+                    # Этот пользователь вообще не отправил пересчет
                     continue
 
                 reports = await CheckoutReportCRUD.get_today_reports(
@@ -654,6 +692,9 @@ class ReportScheduler:
                 )
 
                 if not reports:
+                    # Отправил пересчет, но нет отчетов
+                    submitted_keywords = json.loads(submission.keywords)
+                    partial_info = (0, len(submitted_keywords))
                     continue
 
                 # Проверяем, все ли сдано
@@ -662,61 +703,86 @@ class ReportScheduler:
                 )
 
                 if remaining:
+                    # Сдано не все
+                    submitted_keywords = json.loads(submission.keywords)
+                    submitted_count = len(submitted_keywords) - len(remaining)
+                    partial_info = (submitted_count, len(submitted_keywords))
                     continue
 
-                # Этот аккаунт сдал все - проверяем время
+                # Все сдано - проверяем время
                 last_report = max(reports, key=lambda r: r.submitted_at)
                 deadline = datetime.combine(today, checkout_event.second_deadline_time)
                 deadline = pytz.timezone(settings.TZ).localize(deadline)
 
-                submitted_time = last_report.submitted_at.astimezone(pytz.timezone(settings.TZ))
+                # Обрабатываем timezone
+                if last_report.submitted_at.tzinfo is None:
+                    submitted_time = pytz.timezone(settings.TZ).localize(last_report.submitted_at)
+                else:
+                    submitted_time = last_report.submitted_at.astimezone(pytz.timezone(settings.TZ))
 
-                # Обновляем статус группы на лучший
                 if submitted_time <= deadline:
-                    group_status = 'on_time'
-                    group_representative = user
-                    break  # on_time - лучший статус, можно прервать
-                elif group_status != 'on_time':
-                    group_status = 'late'
-                    group_representative = user
-                    latest_submission_time = submitted_time
-            
-            # Добавляем группу в соответствующую категорию
-            if group_status == 'on_time':
-                on_time.append(group_representative)
-            elif group_status == 'late':
-                late.append((group_representative, latest_submission_time))
+                    # Этот пользователь сдал вовремя - весь магазин считается вовремя
+                    store_status = 'on_time'
+                    break
+                else:
+                    # Опоздал, но хотя бы сдал
+                    if store_status != 'on_time':
+                        store_status = 'late'
+                        latest_submission = submitted_time
+
+            # Распределяем магазин по категориям
+            if store_status == 'on_time':
+                on_time_stores.append((store_id, store_users))
+            elif store_status == 'late':
+                late_stores.append((store_id, store_users, latest_submission))
+            elif partial_info:
+                partial_stores.append((store_id, store_users, partial_info[0], partial_info[1]))
             else:
-                not_submitted.append(group_representative)
+                not_submitted_stores.append((store_id, store_users))
 
-        # Формируем статистику
+        # Формируем сообщение (ТОЛЬКО непустые разделы)
         text = f"📊 <b>Статистика по событию '{checkout_event.first_keyword}'</b>\n\n"
+        has_content = False
 
-        if on_time:
-            text += "✅ <b>Сдали отчеты вовремя:</b>\n"
-            for i, u in enumerate(on_time, 1):
-                username = format_user_mention(u)
-                text += f"{i}. {username}\n"
+        if on_time_stores:
+            has_content = True
+            text += "✅ <b>Сдали вовремя:</b>\n"
+            for store_id, users in on_time_stores:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
             text += "\n"
 
-        if late:
-            text += "⚠️ <b>Немного опоздали со сдачей отчетов:</b>\n"
-            for i, (u, submitted_at) in enumerate(late, 1):
-                username = format_user_mention(u)
-                time_str = submitted_at.strftime('%H:%M')
-                text += f"{i}. {username} (сдал в {time_str})\n"
+        if late_stores:
+            has_content = True
+            text += "⚠️ <b>Сдали, но с опозданием:</b>\n"
+            for store_id, users, late_time in late_stores:
+                mention = format_store_mention(store_id, users)
+                time_str = late_time.strftime('%H:%M')
+                text += f"• {mention} (сдал в {time_str})\n"
             text += "\n"
 
-        if not_submitted:
-            text += "❌ <b>До сих пор не сдали отчет (или отчеты):</b>\n"
-            for i, u in enumerate(not_submitted, 1):
-                username = format_user_mention(u)
-                text += f"{i}. {username}\n"
+        if partial_stores:
+            has_content = True
+            text += "⚠️ <b>Не сдали часть отчетов:</b>\n"
+            for store_id, users, submitted, total in partial_stores:
+                mention = format_store_mention(store_id, users)
+                not_submitted = total - submitted
+                text += f"• {mention} (сдали: {submitted}, не сдали: {not_submitted})\n"
+            text += "\n"
+
+        if not_submitted_stores:
+            has_content = True
+            text += "❌ <b>Не сдали вообще:</b>\n"
+            for store_id, users in not_submitted_stores:
+                mention = format_store_mention(store_id, users)
+                users_list = get_store_users_list(users)
+                text += f"• {mention} ({users_list})\n"
             text += "\n"
             text += "<i>Те, которые указаны в этом списке — жду причину почему, " \
                     "остальным выражаю благодарность за вашу работу!</i>\n"
-        else:
-            text += "🎉 <b>Все сдали отчеты!</b>"
+
+        if not has_content:
+            text += "🎉 <b>Нет данных для отображения</b>"
 
         try:
             await self.bot.send_message(
@@ -785,53 +851,63 @@ class ReportScheduler:
         from bot.database.crud import NoTextReportCRUD, NoTextDayOffCRUD
         
         users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        store_groups = group_users_by_store(users)
         
         on_time = []  # Сдали вовремя
         not_submitted = []  # Не сдали
-        day_offs = []  # Выходной
-        
-        for user in users:
-            # Проверяем выходной
-            dayoff = await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id)
-            if dayoff:
-                day_offs.append(user)
-                continue
-            
-            # Проверяем отчет
-            report = await NoTextReportCRUD.get_today_report(session, user.id, notext_event.id)
-            
-            if report:
-                on_time.append(user)
+        day_off = []  # Выходной
+
+        for store_id, store_users in store_groups.items():
+            # Проверяем весь магазин
+            store_has_report = False
+            store_has_dayoff = False
+
+            for user in store_users:
+                # Проверяем выходной
+                dayoff = await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id)
+                if dayoff:
+                    store_has_dayoff = True
+                    break
+
+                # Проверяем отчет
+                report = await NoTextReportCRUD.get_today_report(session, user.id, notext_event.id)
+                if report:
+                    store_has_report = True
+                    break
+
+            if store_has_dayoff:
+                day_off.append((store_id, store_users))
+            elif store_has_report:
+                on_time.append((store_id, store_users))
             else:
-                not_submitted.append(user)
+                not_submitted.append((store_id, store_users))
         
         # Формируем статистику (только непустые разделы)
         text = f"📊 <b>Статистика отправки фото</b>\n\n"
-        
         has_content = False
         
         if on_time:
             has_content = True
             text += "✅ <b>Сдали вовремя:</b>\n"
-            for u in on_time:
-                username = f"@{u.username}" if u.username else u.full_name
-                text += f"- {username}\n"
+            for store_id, users in on_time:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
             text += "\n"
         
         if not_submitted:
             has_content = True
             text += "❌ <b>Не сдали:</b>\n"
-            for u in not_submitted:
-                username = f"@{u.username}" if u.username else u.full_name
-                text += f"- {username}\n"
+            for store_id, users in not_submitted:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
             text += "\n"
         
-        if day_offs:
+        if day_off:
             has_content = True
             text += "🏖 <b>Выходной:</b>\n"
-            for u in day_offs:
-                username = f"@{u.username}" if u.username else u.full_name
-                text += f"- {username}\n"
+            for store_id, users in day_off:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
         
         if not has_content:
             text += "<i>Нет данных для отображения</i>"
@@ -851,17 +927,24 @@ class ReportScheduler:
         from bot.database.crud import KeywordReportCRUD
         
         users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
+        store_groups = group_users_by_store(users)
         
         on_time = []  # Сдали вовремя
         not_submitted = []  # Не сдали
-        
-        for user in users:
-            report = await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id)
-            
-            if report:
-                on_time.append(user)
+
+        for store_id, store_users in store_groups.items():
+            store_has_report = False
+
+            for user in store_users:
+                report = await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id)
+                if report:
+                    store_has_report = True
+                    break
+
+            if store_has_report:
+                on_time.append((store_id, store_users))
             else:
-                not_submitted.append(user)
+                not_submitted.append((store_id, store_users))
         
         # Формируем статистику (только непустые разделы)
         text = f"📊 <b>Статистика по ключевому слову '{keyword_event.keyword}'</b>\n\n"
@@ -871,17 +954,17 @@ class ReportScheduler:
         if on_time:
             has_content = True
             text += "✅ <b>Сдали вовремя:</b>\n"
-            for u in on_time:
-                username = f"@{u.username}" if u.username else u.full_name
-                text += f"- {username}\n"
+            for store_id, users in on_time:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
             text += "\n"
         
         if not_submitted:
             has_content = True
             text += "❌ <b>Не сдали:</b>\n"
-            for u in not_submitted:
-                username = f"@{u.username}" if u.username else u.full_name
-                text += f"- {username}\n"
+            for store_id, users in not_submitted:
+                mention = format_store_mention(store_id, users)
+                text += f"• {mention}\n"
         
         if not has_content:
             text += "<i>Нет данных для отображения</i>"

@@ -242,30 +242,13 @@ class EventCRUD:
             channel_id: int,
             keyword: str,
             deadline_time: time,
-            min_photos: int = 1,
-            photo_data: bytes = None,
-            file_id: str = None
+            min_photos: int = 1
     ) -> Event:
-        photo_hash = None
-        perceptual_hash = None
-        if photo_data:
-            photo_hash = hashlib.md5(photo_data).hexdigest()
-            try:
-                from PIL import Image
-                import imagehash
-                img = Image.open(io.BytesIO(photo_data))
-                perceptual_hash = str(imagehash.phash(img))
-            except ImportError:
-                pass
-
         event = Event(
             channel_id=channel_id,
             keyword=keyword,
             deadline_time=deadline_time,
-            min_photos=min_photos,
-            template_file_id=file_id,
-            template_hash=photo_hash,
-            template_phash=perceptual_hash
+            min_photos=min_photos
         )
         session.add(event)
         await session.commit()
@@ -289,37 +272,6 @@ class EventCRUD:
             return True
         return False
 
-    @staticmethod
-    async def validate_photo(
-            session: AsyncSession, event_id: int, photo_data: bytes
-    ) -> tuple[bool, Optional[str]]:
-        stmt = select(Event).where(Event.id == event_id)
-        result = await session.execute(stmt)
-        event = result.scalar_one_or_none()
-
-        if not event or not event.template_hash:
-            return True, None
-
-        photo_hash = hashlib.md5(photo_data).hexdigest()
-        if event.template_hash == photo_hash:
-            return True, None
-
-        if event.template_phash:
-            try:
-                from PIL import Image
-                import imagehash
-                img = Image.open(io.BytesIO(photo_data))
-                photo_phash = imagehash.phash(img)
-                template_phash = imagehash.hex_to_hash(event.template_phash)
-
-                if photo_phash - template_phash <= 10:
-                    return True, None
-            except ImportError:
-                pass
-
-        return False, "Фото не соответствует шаблону"
-
-
 class TempEventCRUD:
     @staticmethod
     async def create(
@@ -328,31 +280,14 @@ class TempEventCRUD:
             keyword: str,
             deadline_time: time,
             event_date: date,
-            min_photos: int = 1,
-            photo_data: bytes = None,
-            file_id: str = None
+            min_photos: int = 1
     ) -> TempEvent:
-        photo_hash = None
-        perceptual_hash = None
-        if photo_data:
-            photo_hash = hashlib.md5(photo_data).hexdigest()
-            try:
-                from PIL import Image
-                import imagehash
-                img = Image.open(io.BytesIO(photo_data))
-                perceptual_hash = str(imagehash.phash(img))
-            except ImportError:
-                pass
-
         temp_event = TempEvent(
             channel_id=channel_id,
             keyword=keyword,
             deadline_time=deadline_time,
             event_date=event_date,
-            min_photos=min_photos,
-            template_file_id=file_id,
-            template_hash=photo_hash,
-            template_phash=perceptual_hash
+            min_photos=min_photos
         )
         session.add(temp_event)
         await session.commit()
