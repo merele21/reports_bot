@@ -167,6 +167,9 @@ class CheckoutEvent(Base):
     second_deadline_time: Mapped[dt_time] = mapped_column(Time)
 
     min_photos: Mapped[int] = mapped_column(Integer, default=1)
+    
+    # Время публикации статистики (опционально, по умолчанию 22:00)
+    stats_time: Mapped[Optional[dt_time]] = mapped_column(Time, nullable=True, default=lambda: dt_time(22, 0))
 
     # Словарь допустимых ключевых слов (JSON)
     # Пример: ["элитка", "сигареты", "тихое", "водка", ...]

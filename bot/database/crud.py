@@ -3,7 +3,7 @@ import io
 import json
 import re
 from datetime import date, time
-from sqlite3 import IntegrityError
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, List
 
 from bot.database.models import (
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 ALLOWED_CHECKOUT_KEYWORDS = [
     "элитка", "сигареты", "тихое", "водка", "пиво", "игристое",
     "коктейли", "скоропорт", "сопутка", "вода", "энергетики",
-    "бакалея", "мороженое", "шоколад", "нонфуд"
+    "бакалея", "мороженое", "шоколад", "нонфуд", "штучки"
 ]
 
 
@@ -341,8 +341,12 @@ class CheckoutEventCRUD:
             first_deadline_time: time,
             second_keyword: str,
             second_deadline_time: time,
-            min_photos: int = 1
+            min_photos: int = 1,
+            stats_time: Optional[time] = None
     ) -> CheckoutEvent:
+        if stats_time is None:
+            stats_time = time(22, 0)  # По умолчанию 22:00
+        
         checkout_event = CheckoutEvent(
             channel_id=channel_id,
             first_keyword=first_keyword,
@@ -350,6 +354,7 @@ class CheckoutEventCRUD:
             second_keyword=second_keyword,
             second_deadline_time=second_deadline_time,
             min_photos=min_photos,
+            stats_time=stats_time,
             allowed_keywords=json.dumps(ALLOWED_CHECKOUT_KEYWORDS)
         )
         session.add(checkout_event)

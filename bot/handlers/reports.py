@@ -47,12 +47,14 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 
     logger.info(f"Processing text message: '{text}' from user {message.from_user.id}")
 
-    # Регистрируем пользователя
+    # Регистрируем пользователя с возможным store_id
+    existing_user = await UserCRUD.get_by_telegram_id(session, message.from_user.id)
     user = await UserCRUD.get_or_create(
         session,
         telegram_id=message.from_user.id,
         username=message.from_user.username or None,
         full_name=message.from_user.full_name or None,
+        store_id=existing_user.store_id if existing_user else None,
     )
 
     # Проверяем права
@@ -120,7 +122,6 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 
     # Ищем подходящее checkout событие по first_keyword
     for checkout_event in checkout_events:
-        logger.info(f"Checking checkout event {checkout_event.id}: first_keyword='{checkout_event.first_keyword}'")
         logger.info(f"Checking checkout event {checkout_event.id}: first_keyword='{checkout_event.first_keyword}'")
 
         if not extract_keywords_from_text(text, checkout_event.first_keyword):
@@ -208,12 +209,14 @@ async def handle_photo_message(message: Message, session: AsyncSession):
     caption = message.caption or ""
     today = date.today()
 
-    # Регистрируем автора
+    # Регистрируем автора с возможным store_id
+    existing_user = await UserCRUD.get_by_telegram_id(session, message.from_user.id)
     user = await UserCRUD.get_or_create(
         session,
         telegram_id=message.from_user.id,
         username=message.from_user.username or None,
-        full_name=message.from_user.full_name or None
+        full_name=message.from_user.full_name or None,
+        store_id=existing_user.store_id if existing_user else None,
     )
 
     # Проверка прав
@@ -321,14 +324,18 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         # Формируем ответ
         if is_complete:
+            # Определяем, что показывать - store_id или username
+            mention = user.store_id if user.store_id else (f"@{user.username}" if user.username else user.full_name)
             await message.reply(
-                f"✅ <b>@{user.username or user.store_id}</b> успешно сдал все отчеты, спасибо! 🎉"
+                f"✅ <b>{mention}</b> сдал все отчеты, спасибо! 🎉"
             )
         else:
             completed_str = ", ".join(report_keywords)
             remaining_str = ", ".join(new_remaining)
+            # Определяем, что показывать - store_id или username
+            mention = user.store_id if user.store_id else (f"@{user.username}" if user.username else user.full_name)
             await message.reply(
-                f"✅ <b>@{user.username or user.store_id}</b> успешно сдал отчет по: <b>{completed_str}</b>\n\n"
+                f"✅ <b>{mention}</b> успешно сдал отчет по: <b>{completed_str}</b>\n\n"
                 f"📋 Еще осталось сдать отчет по: <b>{remaining_str}</b>"
             )
 

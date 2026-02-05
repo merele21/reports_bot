@@ -454,28 +454,46 @@ async def cmd_add_users_by_store(
 
 @router.message(Command("list_stores"))
 async def cmd_list_stores(message: Message, session: AsyncSession):
-    """Показать список всех магазинов (store_id) с количеством пользователей"""
+    """Показать список всех магазинов (store_id) с количеством пользователей и их именами"""
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
         return
 
-    # Запрос группировки по store_id
+    # Запрос всех пользователей с store_id
     stmt = (
-        select(User.store_id, func.count(User.id).label('count'))
+        select(User)
         .where(User.is_active == True, User.store_id.isnot(None))
-        .group_by(User.store_id)
         .order_by(User.store_id)
     )
     result = await session.execute(stmt)
-    stores = result.all()
+    users = result.scalars().all()
 
-    if not stores:
+    if not users:
         await message.answer("📋 Магазины с ID не найдены")
         return
 
+    # Группируем пользователей по store_id
+    stores_dict = {}
+    for user in users:
+        if user.store_id not in stores_dict:
+            stores_dict[user.store_id] = []
+        stores_dict[user.store_id].append(user)
+
     text = "<b>📋 Список магазинов:</b>\n\n"
-    for store_id, count in stores:
-        text += f"• <code>{store_id}</code> — {count} чел.\n"
+    for store_id in sorted(stores_dict.keys()):
+        store_users = stores_dict[store_id]
+        count = len(store_users)
+        
+        # Формируем список пользователей с username
+        usernames = []
+        for user in store_users:
+            if user.username:
+                usernames.append(f"@{user.username}")
+            else:
+                usernames.append(user.full_name or f"ID:{user.telegram_id}")
+        
+        users_str = ", ".join(usernames)
+        text += f"• <code>{store_id}</code> — {count} чел. ({users_str})\n"
 
     await message.answer(text)
 
@@ -516,7 +534,12 @@ async def cmd_add_channel(message: Message, command: CommandObject, session: Asy
     await message.answer(
         f"✅ Вы успешно создали канал <b>'{title}'</b>!\n\n"
         "<b>Мини-справка по дальнейшим шагам:</b>\n"
-        "1) Добавьте события (типы отчетов): <code>/add_event</code>\n"
+        "1) Добавьте события (типы отчетов):\n"
+        "<code>/add_event</code> (обычные события)\n"
+        "<code>/add_event_keyword</code> (события по ключевому слову)\n"
+        "<code>/add_event_notext</code> (события без текста (только фото))\n"
+        "<code>/add_event_checkout</code> (двухуровневые события)\n"
+        "<code>/add_tmp_event</code> (временные события (удаляются автоматически в 23:59))\n"
         "2) Добавьте пользователей или магазин: <code>/add_users</code> или <code>/add_users_by_store</code>\n"
         "3) Настройте статистику (опционально): <code>/set_wstat</code>"
     )
@@ -699,7 +722,7 @@ async def cmd_add_tmp_event(message: Message, command: CommandObject, session: A
 async def cmd_add_event_checkout(message: Message, command: CommandObject, session: AsyncSession):
     """
     Двухэтапное событие: пересчет (утро) -> готово (вечер)
-    Формат: /add_event_checkout "Пересчет" 10:00 "Готово" 16:00 1
+    Формат: /add_event_checkout "Пересчет" 10:00 "Готово" 16:00 1 [22:00]
     """
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
@@ -708,13 +731,16 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
     if not command.args:
         await message.answer(
             "<b>Формат команды:</b>\n"
-            "<code>/add_event_checkout \"Первый ключ\" ЧЧ:ММ \"Второй ключ\" ЧЧ:ММ [мин_фото]</code>\n\n"
+            "<code>/add_event_checkout \"Первый ключ\" ЧЧ:ММ \"Второй ключ\" ЧЧ:ММ [мин_фото] [время_статистики]</code>\n\n"
             "<b>Пример:</b>\n"
-            "<code>/add_event_checkout \"Пересчет\" 10:00 \"Готово\" 16:00 1</code>\n\n"
+            "<code>/add_event_checkout \"Категории\" 10:00 \"Готово\" 16:00 1</code>\n"
+            "<b>или</b>\n"
+            "<code>/add_event_checkout \"Категории\" 10:00 \"Готово\" 16:00 1 23:00</code>\n\n"
             "<b>Как это работает:</b>\n"
             "1️⃣ Утром люди пишут: <code>Категории: скоропорт + тихое</code>\n"
             "2️⃣ Вечером отправляют фото с: <code>Готово: скоропорт</code>\n"
-            "3️⃣ Бот отслеживает, что сдано, а что нет\n\n"
+            "3️⃣ Бот отслеживает, что сдано, а что нет\n"
+            "4️⃣ Статистика публикуется в указанное время (по умолчанию 22:00 MSK)\n\n"
             "📋 Допустимые категории:\n"
             "элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
             "скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
@@ -734,6 +760,16 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
         second_keyword = parts[2]
         second_time_str = parts[3]
         min_photos = int(parts[4]) if len(parts) >= 5 and parts[4].isdigit() else 1
+        
+        # Парсим время статистики (опциональный параметр)
+        stats_time = None
+        if len(parts) >= 6 and ':' in parts[5]:
+            try:
+                h_stat, m_stat = map(int, parts[5].split(':'))
+                stats_time = time(h_stat, m_stat)
+            except:
+                await message.answer("❌ Ошибка формата времени статистики! Используйте ЧЧ:ММ.")
+                return
 
         if len(first_keyword) > 24 or len(second_keyword) > 24:
             await message.answer("⚠️ Ключевые слова не должны превышать 24 символа.")
@@ -763,14 +799,17 @@ async def cmd_add_event_checkout(message: Message, command: CommandObject, sessi
             session, channel.id,
             first_keyword, first_deadline,
             second_keyword, second_deadline,
-            min_photos
+            min_photos,
+            stats_time
         )
 
+        stats_time_str = stats_time.strftime('%H:%M') if stats_time else "22:00"
         await message.answer(
             f"✅ Двухэтапное событие создано!\n\n"
             f"1️⃣ <b>{html.quote(first_keyword)}</b> до {first_deadline.strftime('%H:%M')}\n"
             f"2️⃣ <b>{html.quote(second_keyword)}</b> до {second_deadline.strftime('%H:%M')}\n"
-            f"📸 Минимум фото: {min_photos}\n\n"
+            f"📸 Минимум фото: {min_photos}\n"
+            f"📊 Статистика публикуется в: <b>{stats_time_str} MSK</b>\n\n"
             f"<i>Люди должны будут указывать категории из списка:\n"
             f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
             f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
@@ -860,7 +899,7 @@ async def cmd_rm_event(message: Message, state: FSMContext, session: AsyncSessio
     
     # Добавляем keyword события
     if keyword_events:
-        text += "<b>🔑 События с ключевым словом (open/close):</b>\n"
+        text += "<b>🔑 События с ключевым словом (keyword):</b>\n"
         for keyword_event in keyword_events:
             idx_map[str(counter)] = ('keyword_event', keyword_event.id)
             text += (f"{counter}. <b>{keyword_event.keyword}</b> с <b>{keyword_event.deadline_start.strftime('%H:%M')}</b> "

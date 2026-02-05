@@ -636,12 +636,14 @@ class ReportScheduler:
             except Exception as e:
                 logger.error(f"Error cleaning up temp events: {e}", exc_info=True)
 
-    async def send_checkout_daily_stats(self):
-        """Отправка ежедневной статистики checkout событий в 22:00"""
+    async def check_checkout_stats_time(self):
+        """Проверка времени публикации статистики checkout событий (каждую минуту)"""
         async with async_session_maker() as session:
             try:
                 channels = await ChannelCRUD.get_all_active(session)
-                today = date.today()
+                now = datetime.now(pytz.timezone(settings.TZ))
+                current_time = now.time()
+                today = now.date()
 
                 for channel in channels:
                     checkout_events = await CheckoutEventCRUD.get_active_by_channel(
@@ -652,11 +654,21 @@ class ReportScheduler:
                         continue
 
                     for cev in checkout_events:
-                        await self.send_checkout_stats_for_event(
-                            session, channel, cev, today
+                        # Получаем время публикации статистики (по умолчанию 22:00)
+                        stats_time = cev.stats_time if cev.stats_time else dt_time(22, 0)
+                        
+                        # Проверяем, наступило ли время публикации (+/- 1 минута)
+                        time_diff = abs(
+                            (current_time.hour * 60 + current_time.minute) -
+                            (stats_time.hour * 60 + stats_time.minute)
                         )
+                        
+                        if time_diff <= 1:
+                            await self.send_checkout_stats_for_event(
+                                session, channel, cev, today
+                            )
             except Exception as e:
-                logger.error(f"Error sending checkout stats: {e}", exc_info=True)
+                logger.error(f"Error in check_checkout_stats_time: {e}", exc_info=True)
 
     async def send_checkout_stats_for_event(self, session, channel, checkout_event, today):
         """
@@ -1017,11 +1029,11 @@ class ReportScheduler:
             id="cleanup_temp_events"
         )
 
-        # Статистика checkout событий в 22:00
+        # Проверка времени публикации статистики checkout событий (каждую минуту)
         self.scheduler.add_job(
-            self.send_checkout_daily_stats,
-            trigger=CronTrigger(hour=22, minute=0, timezone=settings.TZ),
-            id="send_checkout_daily_stats"
+            self.check_checkout_stats_time,
+            trigger=CronTrigger(minute="*", timezone=settings.TZ),
+            id="check_checkout_stats_time"
         )
         
         # Проверка и публикация статистики notext и keyword событий (каждую минуту)
