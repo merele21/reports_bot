@@ -73,6 +73,9 @@ async def cmd_register(message: Message, command: CommandObject, session: AsyncS
     Форматы:
     /register - регистрация без store_id
     /register MSK-001 - регистрация с store_id
+
+    ВАЖНО: Несколько пользователей МОГУТ иметь одинаковый store_id
+           (это группировка по магазину, не уникальный идентификатор)
     """
 
     is_private = message.chat.type == "private"
@@ -85,18 +88,22 @@ async def cmd_register(message: Message, command: CommandObject, session: AsyncS
     if is_private or is_reg_thread:
         telegram_id = message.from_user.id
         store_id = None
-        if command.args:
-            store_id = command.args.strip().upper()  # Нормализуем к верхнему регистру
 
-            # Валидация формата (опционально)
-            if not re.match(r'^[A-Z0-9\-]{3,50}$', store_id):
-                await message.answer(
-                    "❌ Неверный формат ID магазина.\n\n"
-                    "Используйте формат: <code>MSK-001</code>, <code>SPB-042</code>\n"
-                    "Только буквы, цифры и дефисы (3-50 символов)"
-                )
+        # === ОБРАБОТКА И ВАЛИДАЦИЯ STORE_ID ===
+        if command.args:
+            store_id_raw = command.args.strip().upper()
+
+            # Валидация ТОЛЬКО формата (не уникальности!)
+            validation_result = validate_store_id_format(store_id_raw)
+            if not validation_result["valid"]:
+                await message.answer(validation_result["error_message"])
                 return
 
+            store_id = store_id_raw
+
+            # ✅ УДАЛИЛИ проверку уникальности - несколько человек могут быть в одном магазине!
+
+        # Получаем или создаем пользователя
         existing_user = await UserCRUD.get_by_telegram_id(session, telegram_id)
 
         user = await UserCRUD.get_or_create(
@@ -107,27 +114,91 @@ async def cmd_register(message: Message, command: CommandObject, session: AsyncS
             store_id=store_id or None
         )
 
+        # === ФОРМИРОВАНИЕ ОТВЕТА ===
         if existing_user:
-            response = f"<b>Профиль обновлен, {user.full_name or 'пользователь'}!</b>\n\n"
+            # Пользователь обновляет профиль
+            changes = []
+
+            if existing_user.store_id != user.store_id:
+                if user.store_id:
+                    # Показываем, кто еще в этом магазине
+                    store_users = await UserCRUD.get_by_store_id(session, user.store_id)
+                    other_users = [u for u in store_users if u.telegram_id != telegram_id]
+
+                    changes.append(f"ID магазина: <code>{user.store_id}</code>")
+
+                    if other_users:
+                        changes.append(
+                            f"   👥 В этом магазине уже {len(other_users)} чел.: " +
+                            ", ".join([
+                                f"@{u.username}" if u.username else u.full_name
+                                for u in other_users[:3]
+                            ]) +
+                            (f" и еще {len(other_users) - 3}" if len(other_users) > 3 else "")
+                        )
+                else:
+                    changes.append("ID магазина удален")
+
+            if existing_user.username != user.username:
+                changes.append(f"Username: @{user.username}")
+
+            if existing_user.full_name != user.full_name:
+                changes.append(f"Имя: {user.full_name}")
+
+            if changes:
+                response = f"<b>✅ Профиль обновлен, {user.full_name or 'пользователь'}!</b>\n\n"
+                response += "<b>Изменения:</b>\n"
+                response += "\n".join([f"• {change}" for change in changes])
+                response += f"\n\n<b>Текущий профиль:</b>\n"
+            else:
+                response = f"<b>ℹ️ Профиль без изменений, {user.full_name or 'пользователь'}</b>\n\n"
+
             response += f"Telegram ID: <code>{user.telegram_id}</code>\n"
             if user.username:
                 response += f"Username: @{user.username}\n"
             if user.store_id:
                 response += f"ID магазина: <code>{user.store_id}</code>\n"
             else:
-                response += "\n💡 Совет: укажите ID магазина для группировки:\n"
-                response += "<code>/register MSK-001</code>"
+                response += f"\n💡 <b>Совет:</b> укажите ID магазина для группировки:\n"
+                response += f"<code>/register MSK-001</code>"
         else:
-            response = f"<b>Добро пожаловать, {user.full_name or 'пользователь'}!</b>\n\n"
+            # Новый пользователь
+            response = f"<b>🎉 Добро пожаловать, {user.full_name or 'пользователь'}!</b>\n\n"
             response += "✅ Вы успешно зарегистрированы.\n\n"
             response += f"Telegram ID: <code>{user.telegram_id}</code>\n"
             if user.username:
                 response += f"Username: @{user.username}\n"
+
             if user.store_id:
+                # Проверяем, кто еще в этом магазине
+                store_users = await UserCRUD.get_by_store_id(session, user.store_id)
+                other_users = [u for u in store_users if u.telegram_id != telegram_id]
+
                 response += f"ID магазина: <code>{user.store_id}</code>\n"
+                response += f"\n🏪 Вы привязаны к магазину <b>{user.store_id}</b>\n"
+
+                if other_users:
+                    response += f"👥 В этом магазине уже зарегистрированы ({len(other_users)} чел.):\n"
+                    for i, u in enumerate(other_users[:5], 1):
+                        username_str = f"@{u.username}" if u.username else u.full_name
+                        response += f"   {i}. {username_str}\n"
+
+                    if len(other_users) > 5:
+                        response += f"   ... и еще {len(other_users) - 5} чел.\n"
+
+                    response += f"\nВсе пользователи магазина будут группироваться в отчетах вместе."
+                else:
+                    response += f"Вы первый пользователь в этом магазине! 🎉\n"
+                    response += f"Другие сотрудники могут присоединиться через:\n"
+                    response += f"<code>/register {user.store_id}</code>"
             else:
-                response += "\n💡 Чтобы указать ID магазина, используйте:\n"
-                response += "<code>/register MSK-001</code>"
+                response += f"\n💡 <b>Совет:</b> укажите ID магазина для группировки:\n"
+                response += f"<code>/register MSK-001</code>\n\n"
+                response += f"<b>Примеры ID:</b>\n"
+                response += f"• <code>MSK-001</code> - Москва, магазин 1\n"
+                response += f"• <code>SPB-042</code> - Санкт-Петербург, магазин 42\n"
+                response += f"• <code>KRD-15</code> - Краснодар, магазин 15\n\n"
+                response += f"<i>Несколько человек могут использовать один ID магазина</i>"
 
         await message.answer(response)
     else:

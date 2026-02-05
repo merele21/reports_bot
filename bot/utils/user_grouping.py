@@ -61,7 +61,14 @@ def format_store_mention(store_id: str, users: List[User]) -> str:
             return f"@{user.username}"
         return user.full_name or f"ID:{user.telegram_id}"
 
-    # Это магазин
+    # Для магазина: "MSK-001 (@user1, @user2, @user3)"
+    usernames = []
+    for user in users:
+        if user.username:
+            usernames.append(f"@{user.username}")
+
+    if usernames:
+        return f"{store_id} ({', '.join(usernames)})"
     return store_id
 
 
