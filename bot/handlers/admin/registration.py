@@ -12,11 +12,136 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.crud import UserCRUD, ChannelCRUD
 from bot.database.models import User
-from bot.handlers.admin.utils import validate_store_id_format
+from bot.handlers.admin.utils import validate_store_id_format, is_admin, parse_user_list, format_user_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
 
+
+@router.message(Command("rm_store"))
+async def cmd_rm_store(
+        message: Message,
+        command: CommandObject,
+        session: AsyncSession
+):
+    """
+    Полное удаление (отвязка) магазина.
+    У всех пользователей с этим store_id поле будет очищено.
+
+    Формат: /rm_store [store_id]
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    if not command.args:
+        await message.answer(
+            "<b>Формат:</b> <code>/rm_store [store_id]</code>\n\n"
+            "⚠️ Эта команда удалит привязку к магазину у всех пользователей этого магазина."
+        )
+        return
+
+    store_id = command.args.strip().upper()
+
+    # Проверяем, есть ли такой магазин (есть ли пользователи)
+    users = await UserCRUD.get_by_store_id(session, store_id)
+    if not users:
+        await message.answer(f"❌ Магазин с ID <code>{store_id}</code> не найден (нет привязанных пользователей).")
+        return
+
+    # Выполняем отвязку
+    count = await UserCRUD.unlink_store_from_all_users(session, store_id)
+
+    await message.answer(
+        f"✅ <b>Магазин {store_id} расформирован.</b>\n\n"
+        f"Отвязано пользователей: {count}\n"
+        f"Теперь у них нет привязки к этому магазину."
+    )
+
+    logger.info(f"Store {store_id} removed (unlinked {count} users) by admin {message.from_user.id}")
+
+
+@router.message(Command("rm_users_by_store"))
+async def cmd_rm_users_by_store(
+        message: Message,
+        command: CommandObject,
+        session: AsyncSession
+):
+    """
+    Удаление конкретных пользователей из магазина.
+
+    Формат: /rm_users_by_store [store_id] [targets]
+    Пример: /rm_users_by_store MSK-001 @ivan @petr
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав для выполнения этой команды")
+        return
+
+    args = command.args.split() if command.args else []
+    if len(args) < 2:
+        await message.answer(
+            "<b>Формат:</b> <code>/rm_users_by_store [store_id] [targets]</code>\n"
+            "<b>Пример:</b> <code>/rm_users_by_store MSK-001 @ivan @petr</code>"
+        )
+        return
+
+    store_id = args[0].strip().upper()
+    targets_str = " ".join(args[1:])
+    entries = parse_user_list(targets_str)
+
+    removed_names = []
+    not_found_or_wrong_store = []
+
+    for entry in entries:
+        user = await _find_user_by_identifier(session, entry)
+
+        if user:
+            name = format_user_mention(user.username, user.full_name, user.telegram_id)
+            if user.store_id == store_id:
+                success = await UserCRUD.unlink_store_from_user(session, user.id, store_id)
+                if success:
+                    removed_names.append(name)
+                else:
+                    not_found_or_wrong_store.append(f"{name} (ошибка)")
+            else:
+                current_store = user.store_id if user.store_id else "нет магазина"
+                not_found_or_wrong_store.append(f"{name} (в {current_store})")
+        else:
+            not_found_or_wrong_store.append(f"@{entry} (не найден)")
+
+    response = []
+    response.append(f"<b>🏗 Работа с магазином {store_id}:</b>\n")
+
+    if removed_names:
+        response.append(
+            f"✅ <b>Успешно отвязаны:</b>\n" +
+            "\n".join([f"• {n}" for n in removed_names])
+        )
+
+    if not_found_or_wrong_store:
+        response.append(
+            f"\n⚠️ <b>Не обработаны (не найдены или другой магазин):</b>\n" +
+            "\n".join([f"• {n}" for n in not_found_or_wrong_store])
+        )
+
+    await message.answer("\n".join(response))
+
+
+async def _find_user_by_identifier(
+        session: AsyncSession,
+        identifier: str
+) -> User | None:
+    """
+    Найти пользователя по ID или username
+    (Копия вспомогательной функции для локального использования)
+    """
+    val = identifier.replace("@", "").strip()
+
+    if val.isdigit():
+        return await UserCRUD.get_by_telegram_id(session, int(val))
+    else:
+        res = await session.execute(select(User).where(User.username.ilike(val)))
+        return res.scalar_one_or_none()
 
 @router.message(Command("register"))
 async def cmd_register(
@@ -244,3 +369,4 @@ async def cmd_list_stores(message: Message, session: AsyncSession):
         text += f"• <code>{store_id}</code> — {count} чел. ({users_str})\n"
 
     await message.answer(text)
+

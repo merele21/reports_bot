@@ -137,6 +137,7 @@ class UserCRUD:
 
         return user
 
+
     @staticmethod
     async def get_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
         stmt = select(User).where(User.telegram_id == telegram_id)
@@ -155,6 +156,38 @@ class UserCRUD:
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def unlink_store_from_all_users(session: AsyncSession, store_id: str) -> int:
+        """
+        Удаляет store_id у всех пользователей с этим магазином (отвязывает магазин)
+        Returns: количество обновленных пользователей
+        """
+        stmt = select(User).where(User.store_id == store_id)
+        result = await session.execute(stmt)
+        users = result.scalars().all()
+
+        count = 0
+        for user in users:
+            user.store_id = None
+            count += 1
+
+        if count > 0:
+            await session.commit()
+
+        return count
+
+    @staticmethod
+    async def unlink_store_from_user(session: AsyncSession, user_id: int, store_id: str) -> bool:
+        """
+        Удаляет store_id у конкретного пользователя, если он совпадает с переданным
+        """
+        user = await session.get(User, user_id)
+        if user and user.store_id == store_id:
+            user.store_id = None
+            await session.commit()
+            return True
+        return False
 
 
 class ChannelCRUD:
