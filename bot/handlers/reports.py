@@ -24,11 +24,10 @@ media_groups = {}
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.text, ~F.photo)
 async def handle_checkout_first_phase(message: Message, session: AsyncSession):
     """
-    Обработка первого этапа checkout событий (утренний пересчет)
-    Только для ТЕКСТОВЫХ сообщений БЕЗ фото
-    Пример: "Категории: скоропорт + тихое + бакалея"
-
-    Если пересчет с фото - обрабатывается в handle_photo_message
+    Обработка текстовых сообщений:
+    1. Checkout (первый этап)
+    2. NoText выходные
+    3. Keyword события (текстовые)
     """
     thread_id = message.message_thread_id if message.is_topic_message else None
 
@@ -47,7 +46,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 
     logger.info(f"Processing text message: '{text}' from user {message.from_user.id}")
 
-    # Регистрируем пользователя с возможным store_id
+    # Регистрируем пользователя
     existing_user = await UserCRUD.get_by_telegram_id(session, message.from_user.id)
     user = await UserCRUD.get_or_create(
         session,
@@ -62,56 +61,63 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
         logger.debug(f"User {user.id} not in channel {channel.id}")
         return
 
+
     # === ПРОВЕРКА NOTEXT ВЫХОДНЫХ ===
     from bot.database.crud import NoTextEventCRUD, NoTextDayOffCRUD
-    
+
     text_lower = text.lower().strip()
-    
+
     # Проверяем на слово "выходной"
     if "выходной" in text_lower or "выходная" in text_lower:
         notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
-        
+
         for notext_event in notext_events:
             # Проверяем, не отметил ли пользователь уже выходной
             existing_dayoff = await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id)
             if existing_dayoff:
                 await message.reply("✅ Вы уже отметили выходной на сегодня.")
                 return
-            
+
             # Сохраняем выходной
             from datetime import date
             today = date.today()
             await NoTextDayOffCRUD.create(session, user.id, notext_event.id, today)
-            
+
             await message.reply("✅ Выходной отмечен!")
             logger.info(f"NoText day off: user={user.telegram_id}, event={notext_event.id}")
             return
 
     # === ПРОВЕРКА KEYWORD СОБЫТИЙ ===
     from bot.database.crud import KeywordEventCRUD, KeywordReportCRUD, match_keyword_regex
-    
+
     keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
     now = datetime.now(pytz.timezone(settings.TZ))
     current_time = now.time()
-    
+
     for keyword_event in keyword_events:
-        # Проверяем, находимся ли мы в окне отслеживания
+        # Check if we are in the tracking window
         if keyword_event.deadline_start <= current_time <= keyword_event.deadline_end:
-            # Проверяем ключевое слово с regex
-            if match_keyword_regex(text, keyword_event.keyword):
-                # Проверка на повтор
+            # Check the CAPTION for the keyword
+            if match_keyword_regex(caption, keyword_event.keyword):
+
+                # Check for duplicates (already submitted today)
                 if await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id):
-                    await message.reply("❌ Вы уже отправили сообщение с этим ключевым словом сегодня.")
-                    return
-                
-                # Сохраняем отчет
+                    await message.reply("❌ Вы уже отправили отчет по этому событию сегодня.")
+                    return  # Exit
+
+                # Save the report
                 await KeywordReportCRUD.create(
-                    session, user.id, keyword_event.id, message.message_id, text, is_on_time=True
+                    session,
+                    user.id,
+                    keyword_event.id,
+                    message.message_id,
+                    message_text=caption,
+                    is_on_time=True
                 )
-                
-                await message.reply(f"✅ Сообщение с ключевым словом '{keyword_event.keyword}' принято!")
-                logger.info(f"Keyword event report: user={user.telegram_id}, event={keyword_event.id}")
-                return
+
+                await message.reply(f"✅ Фото с ключевым словом '{keyword_event.keyword}' принято!")
+                logger.info(f"Keyword event report (photo): user={user.telegram_id}, event={keyword_event.id}")
+                return  # Exit
 
     # === ПРОВЕРКА CHECKOUT СОБЫТИЙ ===
     # Получаем все checkout события для канала
@@ -458,6 +464,35 @@ async def handle_photo_message(message: Message, session: AsyncSession):
 
         logger.info(f"Temp event report: user={user.telegram_id}, temp_event={temp_event.id}")
         return  # ✅ Важно: выходим после обработки
+
+    # ПРОВЕРКА KEYWORD СОБЫТИЙ (ФОТО)
+    from bot.database.crud import KeywordEventCRUD, KeywordReportCRUD, match_keyword_regex
+
+    keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
+    now = datetime.now(pytz.timezone(settings.TZ))
+    current_time = now.time()
+
+    for keyword_event in keyword_events:
+        if keyword_event.deadline_start <= current_time <= keyword_event.deadline_end:
+            # Используем caption, так как это фото
+            if match_keyword_regex(caption, keyword_event.keyword):
+
+                if await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id):
+                    await message.reply("❌ Вы уже отправили отчет по этому событию сегодня.")
+                    return
+
+                await KeywordReportCRUD.create(
+                    session,
+                    user.id,
+                    keyword_event.id,
+                    message.message_id,
+                    message_text=caption,
+                    is_on_time=True
+                )
+
+                await message.reply(f"✅ Фото с ключевым словом '{keyword_event.keyword}' принято!")
+                logger.info(f"Keyword event report (photo): user={user.telegram_id}, event={keyword_event.id}")
+                return
 
     # === ПРОВЕРКА NOTEXT СОБЫТИЙ ===
     from bot.database.crud import NoTextEventCRUD, NoTextReportCRUD, NoTextDayOffCRUD
