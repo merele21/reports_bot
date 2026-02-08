@@ -8,7 +8,8 @@ from aiogram.fsm.strategy import FSMStrategy  # Импортируем стра�
 
 from bot.config import settings
 from bot.database.engine import init_db
-from bot.handlers import admin, reports, stats
+from bot.handlers.admin import router as admin_router
+from bot.handlers import reports, stats
 from bot.middlewares.database import DatabaseMiddleware
 from bot.scheduler.tasks import ReportScheduler
 
@@ -36,7 +37,7 @@ async def main():
     dp.message.middleware(DatabaseMiddleware())
 
     # Регистрация роутеров
-    dp.include_router(admin.router)
+    dp.include_router(admin_router)
     dp.include_router(reports.router)
     dp.include_router(stats.router)
 
