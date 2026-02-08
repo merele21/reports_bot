@@ -5,13 +5,16 @@
 import logging
 import shlex
 from datetime import time
+from typing import Optional
 
-from aiogram import Router, html
-from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram import Router, html, F
+from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.types import Message, PhotoSize
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.crud import ChannelCRUD, CheckoutEventCRUD
+from bot.database.crud import ChannelCRUD, CheckoutEventCRUD, KeywordEventCRUD
 from bot.handlers.admin.utils import (
     is_admin,
     parse_time_string,
@@ -21,6 +24,9 @@ from bot.handlers.admin.utils import (
 router = Router()
 logger = logging.getLogger(__name__)
 
+class KeywordEventStates(StatesGroup):
+    """States for keyword event creation with photo"""
+    waiting_for_photo = State()
 
 @router.message(Command("add_event_checkout"))
 async def cmd_add_event_checkout(
@@ -248,13 +254,19 @@ async def cmd_add_event_notext(
 async def cmd_add_event_kw(
         message: Message,
         command: CommandObject,
-        session: AsyncSession
+        session: AsyncSession,
+        state: FSMContext
 ):
     """
     Событие с ключевым словом (например, "открыт")
 
-    Формат: /add_event_kw ЧЧ:ММ ЧЧ:ММ "ключевое слово"
-    Пример: /add_event_kw 09:00 18:00 "открыт"
+    Формат: /add_event_kw ЧЧ:ММ ЧЧ:ММ "ключевое слово" [описание фото]
+
+    Способы использования:
+    1. Команда в тексте: /add_event_kw 09:00 18:00 "открыт"
+    2. Команда в подписи к фото: отправьте фото с подписью /add_event_kw 09:00 18:00 "открыт"
+    3. Команда + ожидание фото: /add_event_kw 09:00 18:00 "открыт" "Пример правильно открытого магазина"
+       → бот попросит отправить фото
     """
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
@@ -263,9 +275,14 @@ async def cmd_add_event_kw(
     if not command.args:
         await message.answer(
             "<b>Формат команды:</b>\n"
-            "<code>/add_event_kw [начало] [конец] \"ключевое слово\"</code>\n\n"
-            "<b>Пример:</b>\n"
+            "<code>/add_event_kw [начало] [конец] \"ключевое слово\" [описание фото]</code>\n\n"
+            "<b>Примеры:</b>\n"
+            "1️⃣ Без фото:\n"
             "<code>/add_event_kw 09:00 18:00 \"открыт\"</code>\n\n"
+            "2️⃣ С фото (отправьте фото с этой командой в подписи):\n"
+            "📸 + <code>/add_event_kw 09:00 18:00 \"открыт\"</code>\n\n"
+            "3️⃣ С фото (бот попросит отправить):\n"
+            "<code>/add_event_kw 09:00 18:00 \"открыт\" \"Пример правильно открытого магазина\"</code>\n\n"
             "Ключевое слово может быть в любом месте сообщения и поддерживает вариации:\n"
             "открыт, открыта, открыто, открытие "
             "(до 5 символов после базового слова)"
@@ -281,6 +298,7 @@ async def cmd_add_event_kw(
         start_str = parts[0]
         end_str = parts[1]
         keyword = parts[2]
+        photo_description = parts[3] if len(parts) >= 4 else None
 
         # Валидация
         validation = validate_keyword_length(keyword)
@@ -314,28 +332,146 @@ async def cmd_add_event_kw(
             await message.answer("Канал не настроен в этой ветке. Сначала /add_channel")
             return
 
-        from bot.database.crud import KeywordEventCRUD
+        # Проверяем наличие фото
+        photo_file_id: Optional[str] = None
+
+        if message.photo:
+            # Фото прикреплено к команде (в подписи)
+            photo_file_id = message.photo[-1].file_id  # Берем самое большое фото
+            logger.info(f"Photo attached to command: {photo_file_id}")
+
+        elif photo_description:
+            # Описание указано - ждем фото
+            await state.update_data(
+                channel_id=channel.id,
+                deadline_start=deadline_start,
+                deadline_end=deadline_end,
+                keyword=keyword,
+                photo_description=photo_description
+            )
+            await state.set_state(KeywordEventStates.waiting_for_photo)
+
+            await message.answer(
+                f"📸 <b>Отправьте эталонное фото</b>\n\n"
+                f"Описание: <i>{html.quote(photo_description)}</i>\n\n"
+                f"Событие будет создано после получения фото.\n"
+                f"Или отправьте /cancel для отмены."
+            )
+            return
+
+        # Создаем событие
         await KeywordEventCRUD.create(
-            session, channel.id, deadline_start, deadline_end, keyword
+            session,
+            channel.id,
+            deadline_start,
+            deadline_end,
+            keyword,
+            reference_photo_file_id=photo_file_id,
+            reference_photo_description=photo_description
         )
 
-        await message.answer(
+        # Формируем ответ
+        response = (
             f"✅ Событие с ключевым словом создано!\n\n"
             f"🔑 Ключевое слово: <b>{html.quote(keyword)}</b>\n"
             f"⏰ Отслеживание: с <b>{deadline_start.strftime('%H:%M')}</b> "
             f"до <b>{deadline_end.strftime('%H:%M')}</b>\n"
             f"📊 Статистика будет опубликована в "
-            f"<b>{deadline_end.strftime('%H:%M')}</b>\n\n"
-            f"💡 Поддерживаются вариации: {keyword}, {keyword}а, "
-            f"{keyword}о и т.д."
+            f"<b>{deadline_end.strftime('%H:%M')}</b>\n"
         )
+
+        if photo_file_id:
+            response += f"\n📸 Эталонное фото прикреплено"
+            if photo_description:
+                response += f"\n📝 Описание: <i>{html.quote(photo_description)}</i>"
+
+        response += f"\n\n💡 Поддерживаются вариации: {keyword}, {keyword}а, {keyword}о и т.д."
+
+        await message.answer(response)
 
         logger.info(
             f"Keyword event created: keyword={keyword}, start={deadline_start}, "
             f"end={deadline_end}, channel_id={channel.id}, "
+            f"has_photo={photo_file_id is not None}, "
             f"by_user={message.from_user.id}"
         )
 
     except Exception as e:
         logger.error(f"Error in add_event_kw: {e}", exc_info=True)
         await message.answer("Произошла ошибка при создании события.")
+
+
+@router.message(KeywordEventStates.waiting_for_photo, F.photo)
+async def process_keyword_event_photo(
+        message: Message,
+        state: FSMContext,
+        session: AsyncSession
+):
+    """Process photo for keyword event creation"""
+    data = await state.get_data()
+
+    # Получаем самое большое фото
+    photo: PhotoSize = message.photo[-1]
+    photo_file_id = photo.file_id
+
+    # Создаем событие с фото
+    await KeywordEventCRUD.create(
+        session,
+        channel_id=data["channel_id"],
+        deadline_start=data["deadline_start"],
+        deadline_end=data["deadline_end"],
+        keyword=data["keyword"],
+        reference_photo_file_id=photo_file_id,
+        reference_photo_description=data.get("photo_description")
+    )
+
+    # Формируем ответ
+    response = (
+        f"✅ Событие с ключевым словом создано!\n\n"
+        f"🔑 Ключевое слово: <b>{html.quote(data['keyword'])}</b>\n"
+        f"⏰ Отслеживание: с <b>{data['deadline_start'].strftime('%H:%M')}</b> "
+        f"до <b>{data['deadline_end'].strftime('%H:%M')}</b>\n"
+        f"📸 Эталонное фото: прикреплено\n"
+    )
+
+    if data.get("photo_description"):
+        response += f"📝 Описание: <i>{html.quote(data['photo_description'])}</i>\n"
+
+    response += (
+        f"\n📊 Статистика будет опубликована в "
+        f"<b>{data['deadline_end'].strftime('%H:%M')}</b>\n"
+        f"\n💡 Поддерживаются вариации: {data['keyword']}, {data['keyword']}а, "
+        f"{data['keyword']}о и т.д."
+    )
+
+    await message.answer(response)
+    await state.clear()
+
+    logger.info(
+        f"Keyword event created with photo: keyword={data['keyword']}, "
+        f"photo_id={photo_file_id}"
+    )
+
+
+@router.message(KeywordEventStates.waiting_for_photo, ~F.photo)
+async def process_invalid_photo_input(message: Message, state: FSMContext):
+    """Handle invalid input when waiting for photo"""
+    if message.text and message.text.startswith("/"):
+        # Команда - выходим из состояния
+        await state.clear()
+        return
+
+    await message.answer(
+        "⚠️ Пожалуйста, отправьте фото или /cancel для отмены."
+    )
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Cancel current FSM operation"""
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+
+    await state.clear()
+    await message.answer("✅ Операция отменена.")

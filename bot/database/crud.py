@@ -137,6 +137,7 @@ class UserCRUD:
 
         return user
 
+
     @staticmethod
     async def get_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
         stmt = select(User).where(User.telegram_id == telegram_id)
@@ -155,6 +156,38 @@ class UserCRUD:
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def unlink_store_from_all_users(session: AsyncSession, store_id: str) -> int:
+        """
+        Удаляет store_id у всех пользователей с этим магазином (отвязывает магазин)
+        Returns: количество обновленных пользователей
+        """
+        stmt = select(User).where(User.store_id == store_id)
+        result = await session.execute(stmt)
+        users = result.scalars().all()
+
+        count = 0
+        for user in users:
+            user.store_id = None
+            count += 1
+
+        if count > 0:
+            await session.commit()
+
+        return count
+
+    @staticmethod
+    async def unlink_store_from_user(session: AsyncSession, user_id: int, store_id: str) -> bool:
+        """
+        Удаляет store_id у конкретного пользователя, если он совпадает с переданным
+        """
+        user = await session.get(User, user_id)
+        if user and user.store_id == store_id:
+            user.store_id = None
+            await session.commit()
+            return True
+        return False
 
 
 class ChannelCRUD:
@@ -818,13 +851,32 @@ class KeywordEventCRUD:
             channel_id: int,
             deadline_start: time,
             deadline_end: time,
-            keyword: str
+            keyword: str,
+            reference_photo_file_id: Optional[str] = None,
+            reference_photo_description: Optional[str] = None
     ) -> KeywordEvent:
+        """
+        Create keyword event with optional reference photo
+
+        Args:
+            session: Database session
+            channel_id: Channel ID
+            deadline_start: Start time for tracking
+            deadline_end: End time for tracking (when stats are published)
+            keyword: Keyword to search for (supports regex)
+            reference_photo_file_id: Optional Telegram file_id of reference photo
+            reference_photo_description: Optional description of the reference photo
+
+        Returns:
+            Created KeywordEvent
+        """
         event = KeywordEvent(
             channel_id=channel_id,
             deadline_start=deadline_start,
             deadline_end=deadline_end,
-            keyword=keyword
+            keyword=keyword,
+            reference_photo_file_id=reference_photo_file_id,
+            reference_photo_description=reference_photo_description
         )
         session.add(event)
         await session.commit()
@@ -832,20 +884,58 @@ class KeywordEventCRUD:
         return event
 
     @staticmethod
-    async def get_active_by_channel(session: AsyncSession, channel_id: int) -> List[KeywordEvent]:
+    async def get_active_by_channel(
+            session: AsyncSession,
+            channel_id: int
+    ) -> List[KeywordEvent]:
+        """Get all active keyword events for a channel"""
         stmt = select(KeywordEvent).where(KeywordEvent.channel_id == channel_id)
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
     @staticmethod
-    async def delete(session: AsyncSession, event_id: int):
+    async def delete(session: AsyncSession, event_id: int) -> bool:
+        """Delete a keyword event"""
         stmt = select(KeywordEvent).where(KeywordEvent.id == event_id)
         result = await session.execute(stmt)
         event = result.scalar_one_or_none()
         if event:
             await session.delete(event)
             await session.commit()
+            return True
+        return False
 
+    @staticmethod
+    async def update_reference_photo(
+            session: AsyncSession,
+            event_id: int,
+            photo_file_id: str,
+            description: Optional[str] = None
+    ) -> Optional[KeywordEvent]:
+        """
+        Update reference photo for existing keyword event
+
+        Args:
+            session: Database session
+            event_id: Event ID
+            photo_file_id: New Telegram file_id
+            description: Optional photo description
+
+        Returns:
+            Updated event or None if not found
+        """
+        stmt = select(KeywordEvent).where(KeywordEvent.id == event_id)
+        result = await session.execute(stmt)
+        event = result.scalar_one_or_none()
+
+        if event:
+            event.reference_photo_file_id = photo_file_id
+            if description is not None:
+                event.reference_photo_description = description
+            await session.commit()
+            await session.refresh(event)
+            return event
+        return None
 
 class KeywordReportCRUD:
     @staticmethod
