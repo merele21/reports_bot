@@ -18,13 +18,16 @@ from . import (
     events,
     events_special,
     users,
-    stats_setup
+    stats_setup,
+    commands_fsm
 )
 
 # Главный роутер для всех админ-хендлеров
 router = Router(name="admin")
 
 # Регистрируем все под-роутеры
+# ВАЖНО: commands_fsm ПЕРВЫМ
+router.include_router(commands_fsm.router)  # ← Перехватывает команды
 router.include_router(registration.router)
 router.include_router(channels.router)
 router.include_router(events.router)

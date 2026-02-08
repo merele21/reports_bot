@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import(
     create_async_engine,
 )
 
-from bot.config import settings
+from bot.cfg import settings
 from bot.database.models import Base, Channel, PhotoTemplate, Report, Stats, User, UserChannel
 
 # --- pytest configuration ---
