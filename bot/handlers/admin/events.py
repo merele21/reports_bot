@@ -210,6 +210,7 @@ async def cmd_add_tmp_event(
 async def cmd_list_events(message: Message, session: AsyncSession):
     """
     Показать список всех событий в текущей ветке
+    Включает превью эталонных фото для keyword событий
     """
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
@@ -230,11 +231,11 @@ async def cmd_list_events(message: Message, session: AsyncSession):
     temp_events = await TempEventCRUD.get_active_by_channel_and_date(
         session, channel.id, today
     )
-
-    from bot.database.crud import CheckoutEventCRUD
     checkout_events = await CheckoutEventCRUD.get_active_by_channel(session, channel.id)
+    notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
+    keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
 
-    if not events and not temp_events and not checkout_events:
+    if not any([events, temp_events, checkout_events, notext_events, keyword_events]):
         await message.answer(
             f"📋 В канале <b>{html.quote(channel.title)}</b> пока нет событий."
         )
@@ -280,13 +281,61 @@ async def cmd_list_events(message: Message, session: AsyncSession):
             text += f"   📸 Мин. фото: {checkout_event.min_photos}\n"
             text += "\n"
 
+    # NoText события
+    if notext_events:
+        text += "<b>📸 События без текста (notext):</b>\n"
+        for i, notext_event in enumerate(notext_events, 1):
+            text += (
+                f"{i}. Отслеживание фото с "
+                f"<b>{notext_event.deadline_start.strftime('%H:%M')}</b> "
+                f"до <b>{notext_event.deadline_end.strftime('%H:%M')}</b>\n"
+            )
+        text += "\n"
+
+    # Keyword события
+    if keyword_events:
+        text += "<b>🔑 События с ключевым словом (keyword):</b>\n"
+        for i, keyword_event in enumerate(keyword_events, 1):
+            text += (
+                f"{i}. <b>{html.quote(keyword_event.keyword)}</b> с "
+                f"<b>{keyword_event.deadline_start.strftime('%H:%M')}</b> "
+                f"до <b>{keyword_event.deadline_end.strftime('%H:%M')}</b>\n"
+            )
+            if keyword_event.reference_photo_file_id:
+                text += f"   📸 Эталонное фото: есть"
+                if keyword_event.reference_photo_description:
+                    text += f" ({html.quote(keyword_event.reference_photo_description)})"
+                text += "\n"
+            text += "\n"
+
     text += (
         f"<b>Всего событий:</b> "
-        f"{len(events) + len(temp_events) + len(checkout_events)}"
+        f"{len(events) + len(temp_events) + len(checkout_events) + len(notext_events) + len(keyword_events)}"
     )
 
     await message.answer(text)
 
+    # Отправляем эталонные фото keyword событий (если есть)
+    for keyword_event in keyword_events:
+        if keyword_event.reference_photo_file_id:
+            caption = (
+                f"📸 <b>Эталонное фото для события \"{html.quote(keyword_event.keyword)}\"</b>\n"
+                f"⏰ {keyword_event.deadline_start.strftime('%H:%M')} - "
+                f"{keyword_event.deadline_end.strftime('%H:%M')}"
+            )
+            if keyword_event.reference_photo_description:
+                caption += f"\n\n📝 {html.quote(keyword_event.reference_photo_description)}"
+
+            try:
+                await message.answer_photo(
+                    photo=keyword_event.reference_photo_file_id,
+                    caption=caption
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to send reference photo for keyword event "
+                    f"{keyword_event.id}: {e}"
+                )
 
 @router.message(Command("rm_event"))
 async def cmd_rm_event(

@@ -818,13 +818,32 @@ class KeywordEventCRUD:
             channel_id: int,
             deadline_start: time,
             deadline_end: time,
-            keyword: str
+            keyword: str,
+            reference_photo_file_id: Optional[str] = None,  # NEW
+            reference_photo_description: Optional[str] = None  # NEW
     ) -> KeywordEvent:
+        """
+        Create keyword event with optional reference photo
+
+        Args:
+            session: Database session
+            channel_id: Channel ID
+            deadline_start: Start time for tracking
+            deadline_end: End time for tracking (when stats are published)
+            keyword: Keyword to search for (supports regex)
+            reference_photo_file_id: Optional Telegram file_id of reference photo
+            reference_photo_description: Optional description of the reference photo
+
+        Returns:
+            Created KeywordEvent
+        """
         event = KeywordEvent(
             channel_id=channel_id,
             deadline_start=deadline_start,
             deadline_end=deadline_end,
-            keyword=keyword
+            keyword=keyword,
+            reference_photo_file_id=reference_photo_file_id,
+            reference_photo_description=reference_photo_description
         )
         session.add(event)
         await session.commit()

@@ -298,7 +298,7 @@ class NoTextDayOff(Base):
 
 
 class KeywordEvent(Base):
-    """Событие с ключевым словом (для open/close)"""
+    """Событие с ключевым словом (для open/close) с поддержкой эталонного фото"""
     __tablename__ = "keyword_events"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -308,6 +308,10 @@ class KeywordEvent(Base):
     deadline_end: Mapped[dt_time] = mapped_column(Time)  # Конец отслеживания
     keyword: Mapped[str] = mapped_column(String(100))  # Ключевое слово для поиска (regex)
 
+    # Эталонное фото (опционально) - NEW
+    reference_photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    reference_photo_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -315,7 +319,6 @@ class KeywordEvent(Base):
     reports: Mapped[list["KeywordReport"]] = relationship(
         back_populates="keyword_event", cascade="all, delete-orphan"
     )
-
 
 class KeywordReport(Base):
     """Отчеты для keyword событий"""
