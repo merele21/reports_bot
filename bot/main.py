@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.strategy import FSMStrategy  # Импортируем стратегию
 
+from bot.commands_ui import set_ui_commands
 from bot.config import settings
 from bot.database.engine import init_db
 from bot.handlers.admin import router as admin_router
@@ -48,6 +49,7 @@ async def main():
     logger.info("🤖 Bot started successfully with Topic Isolation!")
 
     try:
+        await set_ui_commands(bot)
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown()
