@@ -87,7 +87,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
             logger.info(f"NoText day off: user={user.telegram_id}, event={notext_event.id}")
             return
 
-    # === ПРОВЕРКА KEYWORD СОБЫТИЙ ===
+    # === ПРОВЕРКА KEYWORD СОБЫТИЙ (ТЕКСТ) ===
     from bot.database.crud import KeywordEventCRUD, KeywordReportCRUD, match_keyword_regex
 
     keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
@@ -97,26 +97,26 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
     for keyword_event in keyword_events:
         # Check if we are in the tracking window
         if keyword_event.deadline_start <= current_time <= keyword_event.deadline_end:
-            # Check the CAPTION for the keyword
-            if match_keyword_regex(caption, keyword_event.keyword):
+            # Check the TEXT for the keyword (ИСПРАВЛЕНО: было caption)
+            if match_keyword_regex(text, keyword_event.keyword):
 
                 # Check for duplicates (already submitted today)
                 if await KeywordReportCRUD.get_today_report(session, user.id, keyword_event.id):
                     await message.reply("❌ Вы уже отправили отчет по этому событию сегодня.")
                     return  # Exit
 
-                # Save the report
+                # Save the report (ИСПРАВЛЕНО: сохраняем text, а не caption)
                 await KeywordReportCRUD.create(
                     session,
                     user.id,
                     keyword_event.id,
                     message.message_id,
-                    message_text=caption,
+                    message_text=text,
                     is_on_time=True
                 )
 
-                await message.reply(f"✅ Фото с ключевым словом '{keyword_event.keyword}' принято!")
-                logger.info(f"Keyword event report (photo): user={user.telegram_id}, event={keyword_event.id}")
+                await message.reply(f"✅ Сообщение с ключевым словом '{keyword_event.keyword}' принято!")
+                logger.info(f"Keyword event report (text): user={user.telegram_id}, event={keyword_event.id}")
                 return  # Exit
 
     # === ПРОВЕРКА CHECKOUT СОБЫТИЙ ===
@@ -205,10 +205,7 @@ async def handle_photo_message(message: Message, session: AsyncSession):
     2. Временные события (TempEvent)
     3. Checkout события (оба этапа)
     4. NoText события
-
-    ПОРЯДОК ПРОВЕРКИ CHECKOUT:
-    - Сначала первый этап (с фото) - submission
-    - Потом второй этап - report
+    5. Keyword события (с фото)
     """
     thread_id = message.message_thread_id if message.is_topic_message else None
 
@@ -238,18 +235,11 @@ async def handle_photo_message(message: Message, session: AsyncSession):
     checkout_events = await CheckoutEventCRUD.get_active_by_channel(session, channel.id)
 
     logger.info(f"Processing photo from user {user.telegram_id}, caption: '{caption}'")
-    logger.info(f"Found {len(checkout_events)} checkout events for channel {channel.id}")
 
     # === ПРОВЕРКА CHECKOUT СОБЫТИЙ (ПЕРВЫЙ ЭТАП С ФОТО) ===
-    # Проверяем СНАЧАЛА первый этап (пересчет с фото)
     for checkout_event in checkout_events:
-        logger.info(f"Checking first_keyword '{checkout_event.first_keyword}' in caption")
-
         if not extract_keywords_from_text(caption, checkout_event.first_keyword):
-            logger.debug(f"First keyword '{checkout_event.first_keyword}' not found")
             continue
-
-        logger.info(f"Found first keyword '{checkout_event.first_keyword}' with photo")
 
         # Проверка на повтор
         existing = await CheckoutSubmissionCRUD.get_today_submission(
@@ -257,17 +247,15 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         )
         if existing:
             await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
-            return  # ✅ Важно: выходим после обработки
+            return
 
         # Парсим ключевые слова после first_keyword
         caption_lower = caption.lower()
         keyword_lower = checkout_event.first_keyword.lower()
         real_pos = caption_lower.find(keyword_lower)
 
-        if real_pos == -1:
-            continue
+        if real_pos == -1: continue
 
-        # Берем текст после ключевого слова
         after_keyword = caption[real_pos + len(checkout_event.first_keyword):].strip()
 
         for sep in [':', '-', '—', '–']:
@@ -280,14 +268,10 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         if not keywords:
             await message.reply(
                 f"⚠️ Не найдены допустимые категории.\n\n"
-                f"Пожалуйста, используйте слова из списка:\n"
-                f"элитка, сигареты, тихое, водка, пиво, игристое, коктейли,\n"
-                f"скоропорт, сопутка, вода, энергетики, бакалея, мороженое,\n"
-                f"шоколад, нонфуд, штучки"
+                f"Используйте слова из списка: элитка, сигареты, тихое, водка, ..."
             )
-            return  # ✅ Важно: выходим после обработки
+            return
 
-        # Сохраняем submission
         await CheckoutSubmissionCRUD.create(
             session, user.id, checkout_event.id, keywords
         )
@@ -297,28 +281,15 @@ async def handle_photo_message(message: Message, session: AsyncSession):
             f"✅ Первый этап принят!\n\n"
             f"📋 Категории: <b>{keywords_str}</b>\n"
             f"⏰ До {checkout_event.second_deadline_time.strftime('%H:%M')} "
-            f"отправьте отчеты с указанием:\n"
-            f"<code>{checkout_event.second_keyword}: [Категория(-и)]</code>"
+            f"отправьте отчеты."
         )
-
-        logger.info(
-            f"Checkout submission (with photo): user={user.telegram_id}, "
-            f"event={checkout_event.id}, keywords={keywords}"
-        )
-        return  # ✅ ВАЖНО: Выходим, не проверяем дальше
+        return
 
     # === ПРОВЕРКА CHECKOUT СОБЫТИЙ (ВТОРОЙ ЭТАП) ===
-    # Проверяем второй этап только если первый успешно пройден
     for checkout_event in checkout_events:
-        logger.info(f"Checking second_keyword '{checkout_event.second_keyword}' in caption")
-
         if not extract_keywords_from_text(caption, checkout_event.second_keyword):
-            logger.debug(f"Second keyword '{checkout_event.second_keyword}' not found in caption '{caption}'")
             continue
 
-        logger.info(f"Found second keyword '{checkout_event.second_keyword}' in caption")
-
-        # Проверяем, есть ли submission на сегодня
         submission = await CheckoutSubmissionCRUD.get_today_submission(
             session, user.id, checkout_event.id
         )
@@ -328,17 +299,14 @@ async def handle_photo_message(message: Message, session: AsyncSession):
                 f"❌ Сначала нужно отправить отчет с указанием категорий:\n"
                 f"<code>{checkout_event.first_keyword}: [Категория(-и)]</code>"
             )
-            return  # ✅ Важно: выходим после обработки
+            return
 
-        # Парсим категории из текущего отчета
         caption_lower = caption.lower()
         keyword_lower = checkout_event.second_keyword.lower()
         real_pos = caption_lower.find(keyword_lower)
 
-        if real_pos == -1:
-            continue
+        if real_pos == -1: continue
 
-        # Берем текст после ключевого слова
         after_keyword = caption[real_pos + len(checkout_event.second_keyword):].strip()
 
         for sep in [':', '-', '—', '–']:
@@ -353,30 +321,22 @@ async def handle_photo_message(message: Message, session: AsyncSession):
                 f"⚠️ Укажите категорию(-и) после '{checkout_event.second_keyword}'.\n"
                 f"Например: <code>{checkout_event.second_keyword}: скоропорт</code>"
             )
-            return  # ✅ Важно: выходим после обработки
+            return
 
-        # Получаем оставшиеся категории
         remaining = await CheckoutReportCRUD.get_remaining_keywords(
             session, user.id, checkout_event.id
         )
 
-        # Проверяем, что отчитываемые категории были в submission
         submitted_keywords = set(json.loads(submission.keywords))
         invalid_keywords = [kw for kw in report_keywords if kw not in submitted_keywords]
 
         if invalid_keywords:
             await message.reply(
-                f"⚠️ Вы не заявляли эти категории в первом этапе: {', '.join(invalid_keywords)}\n"
+                f"⚠️ Вы не заявляли эти категории: {', '.join(invalid_keywords)}\n"
                 f"Ваши категории: {', '.join(submitted_keywords)}"
             )
-            return  # ✅ Важно: выходим после обработки
+            return
 
-        # Проверка количества фото
-        if checkout_event.min_photos > 1:
-            # TODO: реализовать проверку медиагруппы
-            pass
-
-        # Сохраняем отчет
         new_remaining = set(remaining) - set(report_keywords)
         is_complete = len(new_remaining) == 0
 
@@ -385,87 +345,49 @@ async def handle_photo_message(message: Message, session: AsyncSession):
             message.message_id, 1, report_keywords, is_complete
         )
 
-        # Формируем ответ
+        mention = user.store_id if user.store_id else (f"@{user.username}" if user.username else user.full_name)
         if is_complete:
-            # Определяем, что показывать - store_id или username
-            mention = user.store_id if user.store_id else (f"@{user.username}" if user.username else user.full_name)
-            await message.reply(
-                f"✅ <b>{mention}</b> сдал все отчеты, спасибо! 🎉"
-            )
+            await message.reply(f"✅ <b>{mention}</b> сдал все отчеты, спасибо! 🎉")
         else:
-            completed_str = ", ".join(report_keywords)
-            remaining_str = ", ".join(new_remaining)
-            # Определяем, что показывать - store_id или username
-            mention = user.store_id if user.store_id else (f"@{user.username}" if user.username else user.full_name)
             await message.reply(
-                f"✅ <b>{mention}</b> успешно сдал отчет по: <b>{completed_str}</b>\n\n"
-                f"📋 Еще осталось сдать отчет по: <b>{remaining_str}</b>"
+                f"✅ <b>{mention}</b> успешно сдал: <b>{', '.join(report_keywords)}</b>\n\n"
+                f"📋 Осталось: <b>{', '.join(new_remaining)}</b>"
             )
-
-        logger.info(
-            f"Checkout report: user={user.telegram_id}, event={checkout_event.id}, "
-            f"keywords={report_keywords}, complete={is_complete}"
-        )
-        return  # ✅ ВАЖНО: Выходим, не проверяем дальше
+        return
 
     # === ПРОВЕРКА ОБЫЧНЫХ СОБЫТИЙ ===
     events = await EventCRUD.get_active_by_channel(session, channel.id)
-
     for event in events:
-        if not extract_keywords_from_text(caption, event.keyword):
-            continue
+        if extract_keywords_from_text(caption, event.keyword):
+            if await ReportCRUD.get_today_report(session, user.id, channel.id, event_id=event.id):
+                await message.reply(f"❌ Вы уже сдали отчет '{event.keyword}' сегодня.")
+                return
 
-        # Проверка на повтор
-        if await ReportCRUD.get_today_report(session, user.id, channel.id, event_id=event.id):
-            await message.reply(f"❌ Вы уже сдали отчет '{event.keyword}' сегодня.")
-            return  # ✅ Важно: выходим после обработки
-
-        # Проверка количества фото
-        if event.min_photos > 1:
-            # TODO: Реализовать проверку медиагруппы (как в оригинале)
-            pass
-
-        # Сохраняем отчет
-        await ReportCRUD.create(
-            session, user.id, channel.id, event_id=event.id,
-            message_id=message.message_id, photos_count=1,
-            message_text=caption, is_valid=True
-        )
-
-        await message.reply(f"✅ Отчет '{event.keyword}' принят!")
-
-        logger.info(f"Event report: user={user.telegram_id}, event={event.id}")
-        return  # ✅ Важно: выходим после обработки
+            await ReportCRUD.create(
+                session, user.id, channel.id, event_id=event.id,
+                message_id=message.message_id, photos_count=1,
+                message_text=caption, is_valid=True
+            )
+            await message.reply(f"✅ Отчет '{event.keyword}' принят!")
+            return
 
     # === ПРОВЕРКА ВРЕМЕННЫХ СОБЫТИЙ ===
     temp_events = await TempEventCRUD.get_active_by_channel_and_date(session, channel.id, today)
-
     for temp_event in temp_events:
-        if not extract_keywords_from_text(caption, temp_event.keyword):
-            continue
+        if extract_keywords_from_text(caption, temp_event.keyword):
+            if await ReportCRUD.get_today_report(session, user.id, channel.id, temp_event_id=temp_event.id):
+                await message.reply(f"❌ Вы уже сдали временный отчет '{temp_event.keyword}'.")
+                return
 
-        # Проверка на повтор
-        if await ReportCRUD.get_today_report(session, user.id, channel.id, temp_event_id=temp_event.id):
-            await message.reply(f"❌ Вы уже сдали временный отчет '{temp_event.keyword}' сегодня.")
-            return  # ✅ Важно: выходим после обработки
+            await ReportCRUD.create(
+                session, user.id, channel.id, temp_event_id=temp_event.id,
+                message_id=message.message_id, photos_count=1,
+                message_text=caption, is_valid=True
+            )
+            await message.reply(f"✅ Временный отчет '{temp_event.keyword}' принят!")
+            return
 
-        # Проверка количества фото
-        if temp_event.min_photos > 1:
-            pass
-
-        # Сохраняем отчет
-        await ReportCRUD.create(
-            session, user.id, channel.id, temp_event_id=temp_event.id,
-            message_id=message.message_id, photos_count=1,
-            message_text=caption, is_valid=True
-        )
-
-        await message.reply(f"✅ Временный отчет '{temp_event.keyword}' принят! ⏱")
-
-        logger.info(f"Temp event report: user={user.telegram_id}, temp_event={temp_event.id}")
-        return  # ✅ Важно: выходим после обработки
-
-    # ПРОВЕРКА KEYWORD СОБЫТИЙ (ФОТО)
+    # === ПРОВЕРКА KEYWORD СОБЫТИЙ (ФОТО) ===
     from bot.database.crud import KeywordEventCRUD, KeywordReportCRUD, match_keyword_regex
 
     keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
@@ -498,27 +420,17 @@ async def handle_photo_message(message: Message, session: AsyncSession):
     from bot.database.crud import NoTextEventCRUD, NoTextReportCRUD, NoTextDayOffCRUD
 
     notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
-    now = datetime.now(pytz.timezone(settings.TZ))
-    current_time = now.time()
-
     for notext_event in notext_events:
-        # Проверяем, находимся ли мы в окне отслеживания
         if notext_event.deadline_start <= current_time <= notext_event.deadline_end:
-            # Проверяем, не в выходном ли пользователь
             if await NoTextDayOffCRUD.get_today_dayoff(session, user.id, notext_event.id):
-                logger.debug(f"User {user.telegram_id} is on day off for notext event {notext_event.id}")
-                return  # ✅ Важно: выходим
+                return
 
-            # Проверка на повтор
             if await NoTextReportCRUD.get_today_report(session, user.id, notext_event.id):
                 await message.reply("❌ Вы уже отправили фото сегодня.")
-                return  # ✅ Важно: выходим
+                return
 
-            # Сохраняем отчет (is_on_time будет определен при публикации статистики)
             await NoTextReportCRUD.create(
                 session, user.id, notext_event.id, message.message_id, is_on_time=True
             )
-
             await message.reply("✅ Фото принято!")
-            logger.info(f"NoText event report: user={user.telegram_id}, event={notext_event.id}")
-            return  # ✅ Важно: выходим после обработки
+            return
