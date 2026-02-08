@@ -19,7 +19,7 @@ def is_admin(user_id: int) -> bool:
 async def cmd_stats(message: Message, session: AsyncSession):
     """Показать статистику напоминаний за неделю"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ У вас нет прав для выполнения этой команды")
+        await message.answer("У вас нет прав для выполнения этой команды")
         return
 
     stats = await StatsCRUD.get_weekly_stats(session)
