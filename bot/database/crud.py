@@ -819,8 +819,8 @@ class KeywordEventCRUD:
             deadline_start: time,
             deadline_end: time,
             keyword: str,
-            reference_photo_file_id: Optional[str] = None,  # NEW
-            reference_photo_description: Optional[str] = None  # NEW
+            reference_photo_file_id: Optional[str] = None,
+            reference_photo_description: Optional[str] = None
     ) -> KeywordEvent:
         """
         Create keyword event with optional reference photo
@@ -851,20 +851,58 @@ class KeywordEventCRUD:
         return event
 
     @staticmethod
-    async def get_active_by_channel(session: AsyncSession, channel_id: int) -> List[KeywordEvent]:
+    async def get_active_by_channel(
+            session: AsyncSession,
+            channel_id: int
+    ) -> List[KeywordEvent]:
+        """Get all active keyword events for a channel"""
         stmt = select(KeywordEvent).where(KeywordEvent.channel_id == channel_id)
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
     @staticmethod
-    async def delete(session: AsyncSession, event_id: int):
+    async def delete(session: AsyncSession, event_id: int) -> bool:
+        """Delete a keyword event"""
         stmt = select(KeywordEvent).where(KeywordEvent.id == event_id)
         result = await session.execute(stmt)
         event = result.scalar_one_or_none()
         if event:
             await session.delete(event)
             await session.commit()
+            return True
+        return False
 
+    @staticmethod
+    async def update_reference_photo(
+            session: AsyncSession,
+            event_id: int,
+            photo_file_id: str,
+            description: Optional[str] = None
+    ) -> Optional[KeywordEvent]:
+        """
+        Update reference photo for existing keyword event
+
+        Args:
+            session: Database session
+            event_id: Event ID
+            photo_file_id: New Telegram file_id
+            description: Optional photo description
+
+        Returns:
+            Updated event or None if not found
+        """
+        stmt = select(KeywordEvent).where(KeywordEvent.id == event_id)
+        result = await session.execute(stmt)
+        event = result.scalar_one_or_none()
+
+        if event:
+            event.reference_photo_file_id = photo_file_id
+            if description is not None:
+                event.reference_photo_description = description
+            await session.commit()
+            await session.refresh(event)
+            return event
+        return None
 
 class KeywordReportCRUD:
     @staticmethod
