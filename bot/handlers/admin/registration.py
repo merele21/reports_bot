@@ -62,6 +62,10 @@ async def cmd_register(
         # Получаем или создаем пользователя
         existing_user = await UserCRUD.get_by_telegram_id(session, telegram_id)
 
+        old_store_id = existing_user.store_id if existing_user else None
+        old_username = existing_user.username if existing_user else None
+        old_fullname = existing_user.full_name if existing_user else None
+
         user = await UserCRUD.get_or_create(
             session,
             telegram_id=telegram_id,
@@ -72,7 +76,13 @@ async def cmd_register(
 
         # === ФОРМИРОВАНИЕ ОТВЕТА ===
         response = await _format_registration_response(
-            session, user, existing_user, telegram_id
+            session,
+            user,
+            existing_user,
+            old_store_id,
+            old_username,
+            old_fullname,
+            telegram_id
         )
 
         await message.answer(response)
@@ -94,6 +104,9 @@ async def _format_registration_response(
         session: AsyncSession,
         user: User,
         existing_user: Optional[User],
+        old_store_id: Optional[str],
+        old_username: Optional[str],
+        old_fullname: Optional[str],
         telegram_id: int
 ) -> str:
     """
@@ -111,8 +124,11 @@ async def _format_registration_response(
     if existing_user:
         # Пользователь обновляет профиль
         changes = []
+        has_changes = False
 
-        if existing_user.store_id != user.store_id:
+        if old_store_id != user.store_id:
+            has_changes = True
+
             if user.store_id:
                 # Показываем, кто еще в этом магазине
                 store_users = await UserCRUD.get_by_store_id(session, user.store_id)
@@ -132,13 +148,15 @@ async def _format_registration_response(
             else:
                 changes.append("ID магазина удален")
 
-        if existing_user.username != user.username:
+        if old_username != user.username:
+            has_changes = True
             changes.append(f"Username: @{user.username}")
 
-        if existing_user.full_name != user.full_name:
+        if old_fullname != user.full_name:
+            has_changes = True
             changes.append(f"Имя: {user.full_name}")
 
-        if changes:
+        if has_changes:
             response = f"<b>✅ Профиль обновлен, {user.full_name or 'пользователь'}!</b>\n\n"
             response += "<b>Изменения:</b>\n"
             response += "\n".join([f"• {change}" for change in changes])

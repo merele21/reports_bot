@@ -132,11 +132,11 @@ def validate_store_id_format(store_id: str) -> Dict[str, any]:
                 "Минимальная длина: 4 символа (например, <code>AB-1</code>)\n"
                 f"Ваш ID: <code>{store_id}</code> ({len(store_id)} симв.)\n\n"
                 "<b>Правильный формат:</b> <code>XXX-NNN</code>\n"
-                "• XXX — буквы (2-7 символов)\n"
+                "• XXX — буквы и цифры (2-7 символов)\n"
                 "• NNN — цифры (1-10 цифр)\n\n"
                 "<b>Примеры:</b>\n"
                 "• <code>AB-1</code> (минимум)\n"
-                "• <code>MSK-001</code>\n"
+                "• <code>MSK999-001</code>\n"
                 "• <code>SHOP-42</code>"
             )
         }
@@ -149,16 +149,16 @@ def validate_store_id_format(store_id: str) -> Dict[str, any]:
                 f"Максимальная длина: 18 символов\n"
                 f"Ваш ID: <code>{store_id[:20]}...</code> ({len(store_id)} симв.)\n\n"
                 "<b>Правильный формат:</b> <code>XXX-NNN</code>\n"
-                "• XXX — буквы (2-7 символов)\n"
+                "• XXX — буквы и цифры (2-7 символов)\n"
                 "• NNN — цифры (1-10 цифр)\n\n"
                 "<b>Примеры:</b>\n"
                 "• <code>MOSCOW-123</code>\n"
-                "• <code>SHOP-9876543210</code> (максимум)"
+                "• <code>SHOP32-98765432</code> (максимум)"
             )
         }
 
     # ПАТТЕРН: 2-7 букв, дефис, 1-10 цифр
-    pattern = r'^[A-Z]{2,7}-\d{1,10}$'
+    pattern = r'^[A-Z0-9]{2,7}-\d{1,10}$'
 
     if not re.match(pattern, store_id):
         # Детальная диагностика ошибки
@@ -166,34 +166,33 @@ def validate_store_id_format(store_id: str) -> Dict[str, any]:
 
         # Проверяем наличие дефиса
         if '-' not in store_id:
-            error_details.append("• Отсутствует дефис между буквами и цифрами")
+            error_details.append("• Отсутствует дефис между буквами/цифрами и цифрами")
         elif store_id.count('-') > 1:
             error_details.append("• Допускается только один дефис")
         else:
             parts = store_id.split('-')
 
             if len(parts) != 2:
-                error_details.append("• Неправильная структура (должно быть: БУКВЫ-ЦИФРЫ)")
+                error_details.append("• Неправильная структура (должно быть: БУКВЫ/ЦИФРЫ-ЦИФРЫ)")
             else:
                 letter_part, number_part = parts
 
-                # Проверка буквенной части
+                # Проверка первой части
                 if not letter_part:
-                    error_details.append("• Буквенная часть отсутствует")
-                elif not letter_part.isalpha():
-                    invalid_chars = [c for c in letter_part if not c.isalpha()]
+                    error_details.append("• Первая часть отсутствует")
+                elif not letter_part.isalnum():
+                    # Ищем символы, которые НЕ буквы и НЕ цифры
+                    invalid_chars = [c for c in letter_part if not c.isalnum()]
                     error_details.append(
-                        f"• В буквенной части недопустимые символы: {', '.join(invalid_chars)}"
+                        f"• Недопустимые символы: {', '.join(invalid_chars)}"
                     )
-                elif not letter_part.isupper():
-                    error_details.append("• Используйте только заглавные латинские буквы (A-Z)")
                 elif len(letter_part) < 2:
                     error_details.append(
-                        f"• Буквенная часть слишком короткая ({len(letter_part)} симв., нужно 2-7)"
+                        f"• Первая часть слишком короткая ({len(letter_part)} симв., нужно 2-7)"
                     )
                 elif len(letter_part) > 7:
                     error_details.append(
-                        f"• Буквенная часть слишком длинная ({len(letter_part)} симв., максимум 7)"
+                        f"• Первая часть слишком длинная ({len(letter_part)} симв., максимум 7)"
                     )
 
                 # Проверка цифровой части
@@ -216,11 +215,11 @@ def validate_store_id_format(store_id: str) -> Dict[str, any]:
                 "<b>Обнаруженные проблемы:</b>\n" +
                 "\n".join(error_details) +
                 "\n\n<b>Правильный формат:</b> <code>XXX-NNN</code>\n"
-                "• XXX — латинские буквы A-Z (от 2 до 7 символов)\n"
+                "• XXX — латинские буквы A-Z и цифры 0-9 (от 2 до 7 символов)\n"
                 "• NNN — цифры 0-9 (от 1 до 10 цифр)\n\n"
                 "<b>Примеры правильных ID:</b>\n"
                 "• <code>AB-1</code> (минимум)\n"
-                "• <code>MSK-001</code>\n"
+                "• <code>MSK999-001</code>\n"
                 "• <code>SHOP-42</code>\n"
                 "• <code>MOSCOW-123</code>\n"
                 "• <code>ABCDEFG-1234567890</code> (максимум)\n\n"

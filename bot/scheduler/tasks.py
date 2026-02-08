@@ -31,10 +31,11 @@ class ReportScheduler:
         self.reminders_sent_today = set()
         self.warnings_sent_today = set()
         self.checkout_reminders_sent = set()  # Для checkout событий
+        self.stats_sent_today = set() # Кэш для отправленной статистики
 
     async def check_deadline_warnings(self):
         """Проверка за N минут ДО дедлайна (предупреждение)"""
-        self._cleanup_old_warnings()
+        self._cleanup_old_entries()
 
         async with async_session_maker() as session:
             try:
@@ -347,7 +348,7 @@ class ReportScheduler:
 
     async def check_deadlines(self):
         """Проверка дедлайнов (ПОСЛЕ наступления) + напоминания"""
-        self._cleanup_old_reminders()
+        self._cleanup_old_entries()
 
         async with async_session_maker() as session:
             try:
@@ -367,10 +368,9 @@ class ReportScheduler:
                         )
 
                         # Напоминание через 5 минут после дедлайна
-                        reminder_window_start = deadline + timedelta(minutes=5)
-                        reminder_window_end = deadline + timedelta(minutes=5, seconds=59)
+                        start, end = deadline + timedelta(minutes=5), deadline + timedelta(minutes=5, seconds=59)
 
-                        if reminder_window_start <= now <= reminder_window_end:
+                        if start <= now <= end:
                             key = (ch.id, 'event', ev.id, today)
                             if key in self.reminders_sent_today:
                                 continue
@@ -408,10 +408,9 @@ class ReportScheduler:
                             datetime.combine(today, tev.deadline_time)
                         )
 
-                        reminder_window_start = deadline + timedelta(minutes=5)
-                        reminder_window_end = deadline + timedelta(minutes=5, seconds=59)
+                        start, end = deadline + timedelta(minutes=5), deadline + timedelta(minutes=5, seconds=59)
 
-                        if reminder_window_start <= now <= reminder_window_end:
+                        if start <= now <= end:
                             key = (ch.id, 'temp_event', tev.id, today)
                             if key in self.reminders_sent_today:
                                 continue
@@ -486,13 +485,12 @@ class ReportScheduler:
                         self.checkout_reminders_sent.add(key)
 
             # Второй дедлайн (фотоотчеты)
-            second_deadline = pytz.timezone(settings.TZ).localize(
+            sd = pytz.timezone(settings.TZ).localize(
                 datetime.combine(today, cev.second_deadline_time)
             )
-            second_reminder_start = second_deadline + timedelta(minutes=5)
-            second_reminder_end = second_deadline + timedelta(minutes=5, seconds=59)
+            start, end = sd + timedelta(minutes=5), sd + timedelta(minutes=5, seconds=59)
 
-            if second_reminder_start <= now <= second_reminder_end:
+            if start <= now <= end:
                 key = (channel.id, 'checkout_second', cev.id, today)
                 if key not in self.checkout_reminders_sent:
                     # Находим тех, кто не сдал все фотоотчеты
@@ -654,6 +652,11 @@ class ReportScheduler:
                         continue
 
                     for cev in checkout_events:
+                        # Уникальный ключ для статистики (чтобы не статистика не дублировалась)
+                        stats_key = ('checkout_stats', cev.id, today)
+                        if stats_key in self.stats_sent_today:
+                            continue
+
                         # Получаем время публикации статистики (по умолчанию 22:00)
                         stats_time = cev.stats_time if cev.stats_time else dt_time(22, 0)
                         
@@ -667,6 +670,9 @@ class ReportScheduler:
                             await self.send_checkout_stats_for_event(
                                 session, channel, cev, today
                             )
+                            # Запоминаем, что статистику сегодня уже отправили
+                            self.stats_sent_today.add(stats_key)
+
             except Exception as e:
                 logger.error(f"Error in check_checkout_stats_time: {e}", exc_info=True)
 
@@ -828,6 +834,10 @@ class ReportScheduler:
                     notext_events = await NoTextEventCRUD.get_active_by_channel(session, channel.id)
                     
                     for notext_event in notext_events:
+                        stats_key = ('notext_stats', notext_event.id, today)
+                        if stats_key in self.stats_sent_today:
+                            continue
+
                         # Проверяем, наступило ли время публикации (deadline_end)
                         deadline_end = notext_event.deadline_end
                         
@@ -839,11 +849,16 @@ class ReportScheduler:
                         
                         if time_diff <= 1:
                             await self.send_notext_stats(session, channel, notext_event, today)
+                            self.stats_sent_today.add(stats_key)
                     
                     # Проверяем keyword события
                     keyword_events = await KeywordEventCRUD.get_active_by_channel(session, channel.id)
                     
                     for keyword_event in keyword_events:
+                        stats_key = ('keyword_stats', keyword_event.id, today)
+                        if stats_key in self.stats_sent_today:
+                            continue
+
                         # Проверяем, наступило ли время публикации (deadline_end)
                         deadline_end = keyword_event.deadline_end
                         
@@ -854,6 +869,7 @@ class ReportScheduler:
                         
                         if time_diff <= 1:
                             await self.send_keyword_stats(session, channel, keyword_event, today)
+                            self.stats_sent_today.add(stats_key)
                             
             except Exception as e:
                 logger.error(f"Error in check_notext_keyword_events: {e}", exc_info=True)
@@ -991,20 +1007,12 @@ class ReportScheduler:
         except Exception as e:
             logger.error(f"Error sending keyword stats: {e}")
 
-    def _cleanup_old_reminders(self):
-        """Очистка кэша напоминаний в начале нового дня"""
-        self.reminders_sent_today = {
-            k for k in self.reminders_sent_today if k[3] == date.today()
-        }
-        self.checkout_reminders_sent = {
-            k for k in self.checkout_reminders_sent if k[3] == date.today()
-        }
-
-    def _cleanup_old_warnings(self):
-        """Очистка кэша предупреждений в начале нового дня"""
-        self.warnings_sent_today = {
-            k for k in self.warnings_sent_today if k[3] == date.today()
-        }
+    def _cleanup_old_entries(self):
+        """Очистка всех кэшей в начале нового дня"""
+        today = date.today()
+        self.reminders_sent_today = {k for k in self.reminders_sent_today if k[3] == date.today()}
+        self.warnings_sent_today = {k for k in self.warnings_sent_today if k[3] == date.today()}
+        self.checkout_reminders_sent = {k for k in self.checkout_reminders_sent if k[3] == date.today()}
 
     def start(self):
         """Запуск планировщика"""
