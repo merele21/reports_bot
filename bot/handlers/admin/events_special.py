@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.crud import ChannelCRUD, CheckoutEventCRUD
+from bot.database.crud import ChannelCRUD, CheckoutEventCRUD, KeywordEventCRUD
 from bot.handlers.admin.utils import (
     is_admin,
     parse_time_string,
