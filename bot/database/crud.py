@@ -450,6 +450,36 @@ class CheckoutSubmissionCRUD:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_today_submission_by_store(
+            session: AsyncSession,
+            store_id: str,
+            checkout_event_id: int
+    ) -> Optional[tuple['CheckoutSubmission', User]]:
+        """
+        Check if ANY user from the store has already submitted the first phase.
+        Returns tuple (CheckoutSubmission, User) of the person who submitted it.
+        """
+        today = date.today()
+        stmt = (
+            select(CheckoutSubmission, User)
+            .join(User, CheckoutSubmission.user_id == User.id)
+            .where(
+                and_(
+                    User.store_id == store_id,
+                    CheckoutSubmission.checkout_event_id == checkout_event_id,
+                    CheckoutSubmission.submission_date == today
+                )
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row:
+            return row[0], row[1]  # Submission, User
+        return None
+
+    @staticmethod
     async def get_all_today_submissions(
             session: AsyncSession, checkout_event_id: int
     ) -> List[CheckoutSubmission]:
@@ -651,6 +681,46 @@ class ReportCRUD:
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
+    @staticmethod
+    async def get_today_report_by_store(
+            session: AsyncSession,
+            store_id: str,
+            channel_id: int,
+            event_id: Optional[int] = None,
+            temp_event_id: Optional[int] = None
+    ) -> Optional[tuple['Report', User]]:
+        """
+        Check if ANY user with the given store_id has submitted a report today.
+        Returns (Report, User) if found.
+        """
+        today = date.today()
+
+        conditions = [
+            User.store_id == store_id,
+            Report.channel_id == channel_id,
+            Report.report_date == today,
+            Report.is_valid == True
+        ]
+
+        if event_id is not None:
+            conditions.append(Report.event_id == event_id)
+        if temp_event_id is not None:
+            conditions.append(Report.temp_event_id == temp_event_id)
+
+        stmt = (
+            select(Report, User)
+            .join(User, Report.user_id == User.id)
+            .where(and_(*conditions))
+            .limit(1)
+        )
+
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row:
+            return row[0], row[1]
+        return None
+
 
 class StatsCRUD:
     @staticmethod
@@ -778,6 +848,40 @@ class NoTextReportCRUD:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_today_report_by_store(
+            session: AsyncSession,
+            store_id: str,
+            notext_event_id: int
+    ) -> Optional[tuple['NoTextReport', User]]:
+        """
+        Check if ANY user with the given store_id has submitted a notext report today
+
+        Returns:
+            Tuple of (NoTextReport, User) if found, None otherwise
+        """
+        today = date.today()
+
+        stmt = (
+            select(NoTextReport, User)
+            .join(User, NoTextReport.user_id == User.id)
+            .where(
+                and_(
+                    User.store_id == store_id,
+                    NoTextReport.notext_event_id == notext_event_id,
+                    NoTextReport.report_date == today
+                )
+            )
+            .limit(1)
+        )
+
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row:
+            return row[0], row[1]  # NoTextReport, User
+        return None
+
+    @staticmethod
     async def get_reports_by_event_and_date(
             session: AsyncSession,
             notext_event_id: int,
@@ -810,6 +914,40 @@ class NoTextDayOffCRUD:
         await session.commit()
         await session.refresh(day_off)
         return day_off
+
+    @staticmethod
+    async def get_today_dayoff_by_store(
+            session: AsyncSession,
+            store_id: str,
+            notext_event_id: int
+    ) -> Optional[tuple['NoTextDayOff', User]]:
+        """
+        Check if ANY user with the given store_id has marked day off today
+
+        Returns:
+            Tuple of (NoTextDayOff, User) if found, None otherwise
+        """
+        today = date.today()
+
+        stmt = (
+            select(NoTextDayOff, User)
+            .join(User, NoTextDayOff.user_id == User.id)
+            .where(
+                and_(
+                    User.store_id == store_id,
+                    NoTextDayOff.notext_event_id == notext_event_id,
+                    NoTextDayOff.day_off_date == today
+                )
+            )
+            .limit(1)
+        )
+
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row:
+            return row[0], row[1]  # NoTextDayOff, User
+        return None
 
     @staticmethod
     async def get_today_dayoff(
@@ -975,6 +1113,40 @@ class KeywordReportCRUD:
         )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_today_report_by_store(
+            session: AsyncSession,
+            store_id: str,
+            keyword_event_id: int
+    ) -> Optional[tuple['KeywordReport', User]]:
+        """
+        Check if ANY user with the given store_id has submitted a keyword report today
+
+        Returns:
+            Tuple of (KeywordReport, User) if found, None otherwise
+        """
+        today = date.today()
+
+        stmt = (
+            select(KeywordReport, User)
+            .join(User, KeywordReport.user_id == User.id)
+            .where(
+                and_(
+                    User.store_id == store_id,
+                    KeywordReport.keyword_event_id == keyword_event_id,
+                    KeywordReport.report_date == today
+                )
+            )
+            .limit(1)
+        )
+
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row:
+            return row[0], row[1]  # KeywordReport, User
+        return None
 
     @staticmethod
     async def get_reports_by_event_and_date(

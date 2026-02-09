@@ -13,7 +13,14 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.crud import ChannelCRUD, EventCRUD, TempEventCRUD
+from bot.database.crud import (
+    ChannelCRUD,
+    EventCRUD,
+    TempEventCRUD,
+    CheckoutEventCRUD,
+    NoTextEventCRUD,
+    KeywordEventCRUD
+)
 from bot.handlers.admin.utils import (
     is_admin,
     EventDeletionStates,
@@ -369,11 +376,6 @@ async def cmd_rm_event(
         session, channel.id, today
     )
 
-    from bot.database.crud import (
-        CheckoutEventCRUD,
-        NoTextEventCRUD,
-        KeywordEventCRUD
-    )
     checkout_events = await CheckoutEventCRUD.get_active_by_channel(
         session, channel.id
     )
@@ -485,8 +487,6 @@ async def process_rm_event_index(
 
     event_type, event_id = user_map[val]
 
-    from bot.database.crud import NoTextEventCRUD, KeywordEventCRUD
-
     success = False
     if event_type == 'event':
         success = await EventCRUD.delete(session, event_id)
@@ -495,7 +495,6 @@ async def process_rm_event_index(
         success = await TempEventCRUD.delete(session, event_id)
         event_name = "Временное событие"
     elif event_type == 'checkout_event':
-        from bot.database.crud import CheckoutEventCRUD
         success = await CheckoutEventCRUD.delete(session, event_id)
         event_name = "Двухэтапное событие"
     elif event_type == 'notext_event':

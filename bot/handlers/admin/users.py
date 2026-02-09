@@ -371,23 +371,94 @@ async def cmd_rm_users(
 
 @router.message(Command("list_users"))
 async def cmd_list_users(message: Message, session: AsyncSession):
+    """
+    Показать список пользователей в текущей ветке
+    Теперь с отображением store_id (если есть)
+    """
     if not is_admin(message.from_user.id):
         await message.answer("У вас нет прав для выполнения этой команды")
         return
 
     thread_id = message.message_thread_id if message.is_topic_message else None
-    channel = await ChannelCRUD.get_by_chat_and_thread(session, message.chat.id, thread_id)
+    channel = await ChannelCRUD.get_by_chat_and_thread(
+        session, message.chat.id, thread_id
+    )
+
     if not channel:
-        await message.answer("Канал не настроен.")
+        await message.answer(
+            "В этой ветке нет активного канала. Создайте его через /add_channel"
+        )
         return
 
     users = await UserChannelCRUD.get_users_by_channel(session, channel.id)
-    text = f"<b>👥 Отслеживаемые пользователи ({html.quote(channel.title)}):</b>\n\n"
-    for i, user in enumerate(users, 1):
-        username = html.quote(f"@{user.username}") if user.username else "<i>(без username)</i>"
-        text += f"{i}. {html.quote(user.full_name)} — {username} (ID: <code>{user.telegram_id}</code>)\n"
-    await message.answer(text)
 
+    if not users:
+        await message.answer(
+            f"📋 В канале <b>{html.quote(channel.title)}</b> пока нет пользователей.\n\n"
+            f"Добавьте их через:\n"
+            f"• /add_user — один пользователь\n"
+            f"• /add_users — несколько пользователей\n"
+            f"• /add_users_by_store — по ID магазина"
+        )
+        return
+
+    text = f"<b>👥 Пользователи в канале {html.quote(channel.title)}:</b>\n\n"
+
+    # Группируем пользователей по наличию store_id
+    users_with_store = []
+    users_without_store = []
+
+    for user in users:
+        if user.store_id:
+            users_with_store.append(user)
+        else:
+            users_without_store.append(user)
+
+    # Показываем пользователей с магазинами
+    if users_with_store:
+        text += "<b>🏪 С привязкой к магазину:</b>\n"
+        # Сортируем по store_id для удобства
+        users_with_store.sort(key=lambda u: u.store_id or "")
+
+        for user in users_with_store:
+            # Формируем строку пользователя
+            user_line = f"• <b>{html.quote(user.full_name)}</b>"
+
+            if user.username:
+                user_line += f" — @{user.username}"
+
+            user_line += f" (id: <code>{user.telegram_id}</code>, store: <b>{html.quote(user.store_id)}</b>)"
+
+            text += user_line + "\n"
+
+        text += "\n"
+
+    # Показываем пользователей без магазинов
+    if users_without_store:
+        text += "<b>👤 Без привязки к магазину:</b>\n"
+
+        for user in users_without_store:
+            user_line = f"• <b>{html.quote(user.full_name)}</b>"
+
+            if user.username:
+                user_line += f" — @{user.username}"
+
+            user_line += f" (id: <code>{user.telegram_id}</code>)"
+
+            text += user_line + "\n"
+
+        text += "\n"
+
+    # Статистика
+    text += f"<b>Всего:</b> {len(users)} "
+    if users_with_store:
+        text += f"(🏪 {len(users_with_store)} с магазином, "
+        text += f"👤 {len(users_without_store)} без)"
+
+    # Подсказка
+    text += "\n\n<i>💡 Для редактирования используйте /register или /rm_user</i>"
+
+    await message.answer(text)
 
 
 @router.message(Command("get_user_id"))
