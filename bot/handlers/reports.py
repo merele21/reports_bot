@@ -5,7 +5,10 @@ from datetime import date, datetime
 import pytz
 
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import settings
@@ -21,6 +24,10 @@ logger = logging.getLogger(__name__)
 media_groups = {}
 
 
+class CheckoutStates(StatesGroup):
+    waiting_for_confirmation = State()
+
+
 def format_store_mention(store_id: str, username: str = None, full_name: str = None) -> str:
     """Format store mention for messages"""
     if username:
@@ -30,8 +37,15 @@ def format_store_mention(store_id: str, username: str = None, full_name: str = N
     return store_id
 
 
+def get_confirmation_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Да", callback_data="confirm_kw_yes")
+    builder.button(text="Нет", callback_data="confirm_kw_no")
+    return builder.as_markup()
+
+
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.text, ~F.photo)
-async def handle_checkout_first_phase(message: Message, session: AsyncSession):
+async def handle_checkout_first_phase(message: Message, session: AsyncSession, state: FSMContext):
     """
     Обработка текстовых сообщений:
     1. Checkout (первый этап)
@@ -183,9 +197,13 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
         logger.info(f"Checking checkout event {checkout_event.id}: first_keyword='{checkout_event.first_keyword}'")
 
         if not extract_keywords_from_text(text, checkout_event.first_keyword):
+            logger.debug(f"Keyword '{checkout_event.first_keyword}' not found in text '{text}'")
             continue
 
         logger.info(f"Found keyword '{checkout_event.first_keyword}' in text")
+
+        # === PREPARE FOR POTENTIAL UPDATE LOGIC ===
+        found_submission = None
 
         # === VALIDATION LOGIC ===
         if user.store_id:
@@ -194,36 +212,65 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
                 session, user.store_id, checkout_event.id
             )
             if existing_store:
-                submission, original_user = existing_store
+                found_submission, original_user = existing_store
                 # If someone else from the store started it
-                if original_user.id != user.id:
-                    mention = format_store_mention(user.store_id, original_user.username, original_user.full_name)
-                    await message.reply(
-                        f"⛔ <b>Ошибка!</b>\n\n"
-                        f"Отчет для магазина <b>{user.store_id}</b> уже начал сдавать {mention}.\n"
-                        f"Вам не нужно отправлять отчет повторно."
-                    )
-                    return
-                else:
-                    await message.reply(
-                        f"❌ Вы уже отправили список категорий для '{checkout_event.first_keyword}' сегодня.")
-                    return
+                # Note: For update request, we allow if validation passes later, 
+                # but first we need to see if we should block or ask confirmation.
+                # If strict blocking is needed:
+                # But request says: "ask the user... DO NOT block... block only if specified"
+                # If user B tries to update User A's submission, we proceed to check categories.
+                pass
         else:
             # 2. Individual check (if no store_id)
-            existing = await CheckoutSubmissionCRUD.get_today_submission(
+            found_submission = await CheckoutSubmissionCRUD.get_today_submission(
                 session, user.id, checkout_event.id
             )
-            if existing:
-                await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
-                return
 
-        # Проверка на повтор
-        existing = await CheckoutSubmissionCRUD.get_today_submission(
-            session, user.id, checkout_event.id
-        )
-        if existing:
-            await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
+        # === HANDLE DUPLICATE / UPDATE ===
+        if found_submission:
+            # Check if new message has valid keywords
+            text_lower = text.lower()
+            keyword_lower = checkout_event.first_keyword.lower()
+            real_pos = text_lower.find(keyword_lower)
+
+            if real_pos != -1:
+                after_keyword = text[real_pos + len(checkout_event.first_keyword):].strip()
+                for sep in [':', '-', '—', '–']:
+                    if after_keyword.startswith(sep):
+                        after_keyword = after_keyword[1:].strip()
+                        break
+
+                new_keywords = parse_checkout_keywords(after_keyword)
+
+                if new_keywords:
+                    # Valid keywords found, ask for confirmation
+                    await state.set_state(CheckoutStates.waiting_for_confirmation)
+                    await state.update_data(
+                        submission_id=found_submission.id,
+                        new_keywords=new_keywords,
+                        user_name=message.from_user.full_name
+                    )
+
+                    keywords_str = ", ".join(new_keywords)
+                    await message.reply(
+                        f"⚠️ Вы уже отправляли список категорий.\n"
+                        f"Хотите изменить его на: <b>{keywords_str}</b>?",
+                        reply_markup=get_confirmation_keyboard()
+                    )
+                    return
+
+            # If no valid keywords found or user just duplicated command without categories
+            if user.store_id and 'original_user' in locals() and original_user.id != user.id:
+                mention = format_store_mention(user.store_id, original_user.username, original_user.full_name)
+                await message.reply(
+                    f"⛔ <b>Ошибка!</b>\n\n"
+                    f"Отчет для магазина <b>{user.store_id}</b> уже начал сдавать {mention}.\n"
+                    f"Вам не нужно отправлять отчет повторно."
+                )
+            else:
+                await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
             return
+        # === END VALIDATION ===
 
         # Парсим ключевые слова после first_keyword
         text_lower = text.lower()
@@ -274,7 +321,7 @@ async def handle_checkout_first_phase(message: Message, session: AsyncSession):
 
 
 @router.message(F.chat.type.in_(["group", "supergroup"]), F.photo)
-async def handle_photo_message(message: Message, session: AsyncSession):
+async def handle_photo_message(message: Message, session: AsyncSession, state: FSMContext):
     """
     Обработка отчетов:
     1. Обычные события (Event) - STORE-BASED
@@ -317,31 +364,66 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         if not extract_keywords_from_text(caption, checkout_event.first_keyword):
             continue
 
-        # === NEW VALIDATION LOGIC START ===
+        # === PREPARE FOR POTENTIAL UPDATE LOGIC ===
+        found_submission = None
+
+        # === VALIDATION LOGIC PHASE 1 ===
         if user.store_id:
             existing_store = await CheckoutSubmissionCRUD.get_today_submission_by_store(
                 session, user.store_id, checkout_event.id
             )
             if existing_store:
-                submission, original_user = existing_store
-                if original_user.id != user.id:
-                    mention = format_store_mention(original_user.username, original_user.full_name)
-                    await message.reply(
-                        f"⛔ <b>Ошибка!</b>\n\n"
-                        f"Отчет для магазина <b>{user.store_id}</b> уже начал сдавать {mention}.\n"
-                        f"Вам не нужно отправлять отчет повторно."
-                    )
-                    return
-                else:
-                    await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
-                    return
+                found_submission, original_user = existing_store
         else:
-            existing = await CheckoutSubmissionCRUD.get_today_submission(
+            found_submission = await CheckoutSubmissionCRUD.get_today_submission(
                 session, user.id, checkout_event.id
             )
-            if existing:
-                await message.reply(f"❌ Вы уже отправили отчет по '{checkout_event.first_keyword}' сегодня.")
-                return
+
+        # === HANDLE DUPLICATE / UPDATE ===
+        if found_submission:
+            # Check for new keywords
+            caption_lower = caption.lower()
+            keyword_lower = checkout_event.first_keyword.lower()
+            real_pos = caption_lower.find(keyword_lower)
+
+            if real_pos != -1:
+                after_keyword = caption[real_pos + len(checkout_event.first_keyword):].strip()
+                for sep in [':', '-', '—', '–']:
+                    if after_keyword.startswith(sep):
+                        after_keyword = after_keyword[1:].strip()
+                        break
+
+                new_keywords = parse_checkout_keywords(after_keyword)
+
+                if new_keywords:
+                    await state.set_state(CheckoutStates.waiting_for_confirmation)
+                    await state.update_data(
+                        submission_id=found_submission.id,
+                        new_keywords=new_keywords,
+                        user_name=message.from_user.full_name
+                    )
+
+                    keywords_str = ", ".join(new_keywords)
+                    await message.reply(
+                        f"⚠️ Вы уже отправляли список категорий.\n"
+                        f"Хотите изменить его на: <b>{keywords_str}</b>?",
+                        reply_markup=get_confirmation_keyboard()
+                    )
+                    return
+
+            # Standard blocking
+            if user.store_id and 'original_user' in locals() and original_user.id != user.id:
+                mention = format_store_mention(original_user.username, original_user.full_name)
+                await message.reply(
+                    f"⛔ <b>Ошибка!</b>\n\n"
+                    f"Отчет для магазина <b>{user.store_id}</b> уже начал сдавать {mention}.\n"
+                    f"Вам не нужно отправлять отчет повторно."
+                )
+            else:
+                await message.reply(
+                    f"❌ Вы уже отправили список категорий для '{checkout_event.first_keyword}' сегодня.")
+            return
+        # === END VALIDATION PHASE 1 ===
 
         # Парсим ключевые слова после first_keyword
         caption_lower = caption.lower()
@@ -384,23 +466,23 @@ async def handle_photo_message(message: Message, session: AsyncSession):
         if not extract_keywords_from_text(caption, checkout_event.second_keyword):
             continue
 
+        # === VALIDATION LOGIC PHASE 2 ===
         if user.store_id:
             existing_store_sub = await CheckoutSubmissionCRUD.get_today_submission_by_store(
                 session, user.store_id, checkout_event.id
             )
-            # If ANYONE from this store started the report
             if existing_store_sub:
-                store_submission, original_user = existing_store_sub
-
-                # If the person who started it is NOT the current user
+                _, original_user = existing_store_sub
+                # Check if the user trying to submit is DIFFERENT from the one who started
                 if original_user.id != user.id:
                     mention = format_store_mention(original_user.username, original_user.full_name)
                     await message.reply(
                         f"⛔ <b>Ошибка!</b>\n\n"
                         f"Отчет для магазина <b>{user.store_id}</b> ведет {mention}.\n"
-                        f"Только этот пользователь может сдать вторую часть ('{checkout_event.second_keyword}')."
+                        f"Вы не можете сдать вторую часть."
                     )
                     return
+        # ====================================
 
         submission = await CheckoutSubmissionCRUD.get_today_submission(
             session, user.id, checkout_event.id
@@ -649,3 +731,41 @@ async def handle_photo_message(message: Message, session: AsyncSession):
                 await message.reply("✅ Фото принято!")
             logger.info(f"NoText event report: user={user.telegram_id}, event={notext_event.id}, store={user.store_id}")
             return
+
+
+@router.callback_query(F.data.startswith("confirm_kw_"))
+async def process_checkout_confirmation(
+        callback: CallbackQuery,
+        state: FSMContext,
+        session: AsyncSession
+):
+    """Handle the confirmation for updating keywords"""
+    action = callback.data.split("_")[-1]  # "yes" or "no"
+    data = await state.get_data()
+
+    submission_id = data.get("submission_id")
+    new_keywords = data.get("new_keywords")
+    user_name = data.get("user_name", "Пользователь")
+
+    if not submission_id or not new_keywords:
+        await callback.message.edit_text("❌ Ошибка контекста. Повторите отправку.")
+        await state.clear()
+        return
+
+    if action == "yes":
+        success = await CheckoutSubmissionCRUD.update(
+            session, submission_id, new_keywords
+        )
+        if success:
+            keywords_str = ", ".join(new_keywords)
+            await callback.message.edit_text(
+                f"✅ <b>{user_name}</b> обновил список категорий.\n\n"
+                f"📋 Новые категории: <b>{keywords_str}</b>"
+            )
+        else:
+            await callback.message.edit_text("❌ Ошибка обновления. Запись не найдена.")
+    else:
+        await callback.message.edit_text("🚫 Обновление отменено. Оставлен старый список.")
+
+    await state.clear()
+

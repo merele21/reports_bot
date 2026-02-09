@@ -36,6 +36,7 @@ async def main():
 
     # Регистрация middleware
     dp.message.middleware(DatabaseMiddleware())
+    dp.callback_query.middleware(DatabaseMiddleware())
 
     # Регистрация роутеров
     dp.include_router(admin_router)

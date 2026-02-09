@@ -1,3 +1,4 @@
+
 import hashlib
 import io
 import json
@@ -136,7 +137,6 @@ class UserCRUD:
                 await session.refresh(user)
 
         return user
-
 
     @staticmethod
     async def get_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
@@ -305,6 +305,7 @@ class EventCRUD:
             return True
         return False
 
+
 class TempEventCRUD:
     @staticmethod
     async def create(
@@ -379,7 +380,7 @@ class CheckoutEventCRUD:
     ) -> CheckoutEvent:
         if stats_time is None:
             stats_time = time(22, 0)  # По умолчанию 22:00
-        
+
         checkout_event = CheckoutEvent(
             channel_id=channel_id,
             first_keyword=first_keyword,
@@ -490,6 +491,22 @@ class CheckoutSubmissionCRUD:
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def update(
+            session: AsyncSession,
+            submission_id: int,
+            new_keywords: List[str]
+    ) -> bool:
+        stmt = select(CheckoutSubmission).where(CheckoutSubmission.id == submission_id)
+        result = await session.execute(stmt)
+        submission = result.scalar_one_or_none()
+
+        if submission:
+            submission.keywords = json.dumps(new_keywords)
+            await session.commit()
+            return True
+        return False
 
 
 class CheckoutReportCRUD:
@@ -1075,6 +1092,7 @@ class KeywordEventCRUD:
             return event
         return None
 
+
 class KeywordReportCRUD:
     @staticmethod
     async def create(
@@ -1168,11 +1186,11 @@ def match_keyword_regex(text: str, keyword: str) -> bool:
     """
     Проверка текста на соответствие ключевому слову с поддержкой regex
     Позволяет добавить до 5 любых символов после ключевого слова
-    
+
     Args:
         text: текст сообщения
         keyword: базовое ключевое слово
-    
+
     Returns:
         bool: найдено ли совпадение
     """
