@@ -1,0 +1,147 @@
+# ⚠️ ВАЖНО: Порядок параметров в Aiogram 3
+
+## 🔴 Проблема
+
+В Aiogram 3 middleware передает параметры в handlers через **keyword arguments**, НО порядок параметров в сигнатуре функции **имеет значение** для некоторых типов данных.
+
+## ✅ Правильный порядок параметров
+
+### Для Message handlers:
+```python
+async def handler(
+    message: Message,      # 1. Обязательный (event)
+    state: FSMContext,     # 2. Опциональный (FSM)
+    session: AsyncSession  # 3. Опциональный (Database)
+):
+    pass
+```
+
+### Для CallbackQuery handlers:
+```python
+async def handler(
+    callback: CallbackQuery,  # 1. Обязательный (event)
+    state: FSMContext,        # 2. Опциональный (FSM)
+    session: AsyncSession     # 3. Опциональный (Database)
+):
+    pass
+```
+
+## ❌ Неправильный порядок (ВЫЗЫВАЕТ ОШИБКИ)
+
+```python
+# ОШИБКА 1: session перед state
+async def handler(
+    callback: CallbackQuery,
+    session: AsyncSession,  # ❌ Не так!
+    state: FSMContext
+):
+    pass
+
+# ОШИБКА 2: session перед обязательным параметром
+async def handler(
+    session: AsyncSession,  # ❌ Не так!
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    pass
+```
+
+## 🔧 Исправления в commands_fsm.py
+
+### ✅ Исправлено:
+
+1. **process_register_no_store** (строка ~172)
+   ```python
+   # БЫЛО:
+   async def process_register_no_store(
+       callback: CallbackQuery,
+       session: AsyncSession,  # ❌
+       state: FSMContext
+   ):
+
+   # СТАЛО:
+   async def process_register_no_store(
+       callback: CallbackQuery,
+       state: FSMContext,      # ✅
+       session: AsyncSession
+   ):
+   ```
+
+2. **process_register_with_store** (строка ~212)
+   ```python
+   # БЫЛО:
+   async def process_register_with_store(
+       callback: CallbackQuery,
+       state: FSMContext,
+       session: AsyncSession  # Этот параметр НЕ используется
+   ):
+
+   # СТАЛО:
+   async def process_register_with_store(
+       callback: CallbackQuery,
+       state: FSMContext
+       # session убран, т.к. не используется
+   ):
+   ```
+
+3. **process_cancel_callback** (строка ~1377)
+   ```python
+   # БЫЛО:
+   async def process_cancel_callback(
+       callback: CallbackQuery,
+       state: FSMContext,
+       session: AsyncSession  # Не используется
+   ):
+
+   # СТАЛО:
+   async def process_cancel_callback(
+       callback: CallbackQuery,
+       state: FSMContext
+       # session убран
+   ):
+   ```
+
+## 📋 Правило большого пальца
+
+**Порядок параметров:**
+1. Event (Message / CallbackQuery) — **ВСЕГДА ПЕРВЫЙ**
+2. FSMContext (state) — если нужен
+3. AsyncSession (session) — если нужен
+4. Другие зависимости — в конце
+
+**Удаляй неиспользуемые параметры:**
+- Если `session` не используется в функции → убери из параметров
+- Если `state` не используется → убери из параметров
+- Это **не** экономия, это **избежание конфликтов** при DI
+
+## 🎯 Почему это важно
+
+Aiogram использует **dependency injection** через middleware. Если порядок параметров неправильный, может произойти:
+
+1. **TypeError** — неправильный positional argument
+2. **Missing argument** — параметр не передан
+3. **Wrong type** — передан объект неправильного типа
+
+## ✅ Проверка
+
+После исправлений проверь:
+
+```python
+# Все CallbackQuery handlers:
+@router.callback_query(...)
+async def handler(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    #                 ^^^^^^^^^^^^^^^^        ^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^
+    #                 1. Event                2. FSM           3. Database
+    pass
+
+# Все Message handlers:
+@router.message(...)
+async def handler(message: Message, state: FSMContext, session: AsyncSession):
+    #             ^^^^^^^^^^^^^^^    ^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^
+    #             1. Event           2. FSM           3. Database
+    pass
+```
+
+## 🚀 Результат
+
+После применения этих исправлений все callback-кнопки должны работать без ошибок `missing required positional argument`.

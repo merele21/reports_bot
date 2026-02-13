@@ -11,6 +11,11 @@ build/
 dist/
 *.egg-info/
 
+# JSON
+credentials/
+*.json
+!package.json
+
 # Database
 *.db
 *.sqlite

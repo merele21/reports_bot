@@ -39,9 +39,10 @@ async def set_ui_commands(bot: Bot):
         BotCommand(command="list_users", description="📝 Список участников"),
         BotCommand(command="list_stores", description="🏬 Список магазинов"),
 
-        # === Настройки ===
+        # === Статистика ===
         BotCommand(command="set_wstat", description="⚙️ Настройка статистики"),
         BotCommand(command="get_thread_id", description="🔍 Узнать ID ветки"),
+        BotCommand(command="list_rn", description="📊 Текущая статистика"),
     ]
 
     # Устанавливаем команды для каждого админа

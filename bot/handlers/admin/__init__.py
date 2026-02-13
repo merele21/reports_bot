@@ -19,7 +19,8 @@ from . import (
     events_special,
     users,
     stats_setup,
-    commands_fsm
+    commands_fsm,
+    list_rn
 )
 
 # Главный роутер для всех админ-хендлеров
@@ -34,5 +35,6 @@ router.include_router(events.router)
 router.include_router(events_special.router)
 router.include_router(users.router)
 router.include_router(stats_setup.router)
+router.include_router(list_rn.router)
 
 __all__ = ["router"]
