@@ -10,23 +10,21 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import Chat, Message, User as TelegramUser
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import(
+from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 
-from bot.cfg import settings
-from bot.database.models import Base, Channel, PhotoTemplate, Report, Stats, User, UserChannel
+from bot.config import settings
+from bot.database.models import Base, Channel, Report, User, UserChannel, Event
 
 # --- pytest configuration ---
 def pytest_configure(config):
     """configure pytest"""
-    # set test environment
     os.environ["ENVIRONMENT"] = "test"
-    os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory"
+    os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
     os.environ["LOG_LEVEL"] = "DEBUG"
 
 @pytest.fixture(scope="session")
@@ -57,11 +55,11 @@ async def engine() -> AsyncGenerator[AsyncEngine, None]:
 @pytest.fixture(scope="function")
 async def async_session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """create async session for test"""
-    async_session_maker = async_sessionmaker(
+    session_maker = async_sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False
     )
 
-    async with async_session_maker() as session:
+    async with session_maker() as session:
         yield session
         await session.rollback()
 
@@ -86,39 +84,29 @@ async def test_channel(async_session: AsyncSession) -> Channel:
     channel = Channel(
         telegram_id=-1001234567890,
         thread_id=None,
-        title="Test Channel",
-        report_type="report1",
-        keyword="report1",
-        deadline_time=time(10, 0),
-        min_photos=2,
+        title="TestChannel",
         is_active=True,
         stats_chat_id=-1001234567890,
         stats_thread_id=None,
     )
     async_session.add(channel)
-    async_session.commit()
+    await async_session.commit()
     await async_session.refresh(channel)
     return channel
 
 @pytest.fixture
-async def test_channel_with_thread(async_session: AsyncSession) -> Channel:
-    """create test channel with thread"""
-    channel = Channel(
-        telegram_id=-1001234567890,
-        thread_id=42,
-        title="Test Channel - Topic 42",
-        report_type="report2",
-        keyword="report2",
-        deadline_time=time(14, 0),
-        min_photos=1,
-        is_active=True,
-        stats_chat_id=-1001234567890,
-        stats_thread_id=50,
+async def test_event(async_session: AsyncSession, test_channel: Channel) -> Event:
+    """create test event"""
+    event = Event(
+        channel_id=test_channel.id,
+        keyword="report1",
+        deadline_time=time(10, 0),
+        min_photos=2
     )
-    async_session.add(channel)
-    async_session.commit()
-    await async_session.refresh(channel)
-    return channel
+    async_session.add(event)
+    await async_session.commit()
+    await async_session.refresh(event)
+    return event
 
 @pytest.fixture
 async def test_user_channel(
@@ -131,43 +119,6 @@ async def test_user_channel(
     await async_session.refresh(user_channel)
     return user_channel
 
-@pytest.fixture
-async def test_report(
-        async_session: AsyncSession, test_user: User, test_channel: Channel
-) -> Report:
-    """create test report"""
-    report = Report(
-        user_id=test_user.id,
-        channel_id=test_channel.id,
-        report_date=date.today(),
-        message_id=12345,
-        photos_count=2,
-        message_text="Test report with keyword report1",
-        is_valid=True,
-        template_validated=False,
-    )
-    async_session.add(report)
-    async_session.commit()
-    await async_session.refresh(report)
-    return report
-
-@pytest.fixture
-async def test_photo_template(
-        async_session: AsyncSession, test_channel: Channel
-) -> PhotoTemplate:
-    """create test photo template"""
-    template = PhotoTemplate(
-        channel_id=test_channel.id,
-        file_id="AgACAgIAAxkBAAI...",
-        photo_hash="abc123def456",
-        perceptual_hash="0123456789abcdef",
-        description="Test template",
-    )
-    async_session.add(template)
-    await async_session.commit()
-    await async_session.refresh(template)
-    return template
-
 # --- telegram mocks ---
 @pytest.fixture
 def mock_bot() -> Mock:
@@ -178,32 +129,43 @@ def mock_bot() -> Mock:
     bot.send_message = AsyncMock()
     bot.send_photo = AsyncMock()
     bot.download_file = AsyncMock()
-    bot.get_file = AsyncMock()
+
+    # Mock get_file return value
+    mock_file = MagicMock()
+    mock_file.file_path = "test_path"
+    bot.get_file = AsyncMock(return_value=mock_file)
     return bot
 
 @pytest.fixture
-def mock_telegram_user() -> TelegramUser:
-    """mock telegram user"""
-    return TelegramUser(
-        id=123456789,
-        is_bot=False,
-        first_name="Test",
-        last_name="User",
-        username="testuser",
-        language_code="en",
-    )
+def mock_telegram_user() -> MagicMock:
+    """
+    Mock user as MagicMock (Mutable).
+    Explicitly set strings for DB fields to avoid 'MagicMock is not supported' errors.
+    """
+    user = MagicMock(spec=TelegramUser)
+    user.id = 123456789
+    user.is_bot = False
+    user.first_name = "Test"
+    user.last_name = "User"
+    user.username = "testuser"
+    user.full_name = "Test User"  # <--- THIS WAS MISSING
+    user.language_code = "en"
+    return user
 
 @pytest.fixture
-def mock_chat() -> Chat:
-    """mock telegram chat"""
-    return Chat(
-        id=-1001234567890,
-        type="supergroup",
-        title="Test Group",
-    )
+def mock_chat() -> MagicMock:
+    """
+    Mock chat as MagicMock (Mutable) instead of Chat (Frozen Pydantic).
+    This allows tests to change chat.id dynamically.
+    """
+    chat = MagicMock(spec=Chat)
+    chat.id = -1001234567890
+    chat.type = "supergroup"
+    chat.title = "Test Group"
+    return chat
 
 @pytest.fixture
-def mock_message(mock_telegram_user: TelegramUser, mock_chat: Chat, mock_bot: Bot) -> Message:
+def mock_message(mock_telegram_user: TelegramUser, mock_chat: MagicMock, mock_bot: Bot) -> Message:
     """mock telegram message"""
     message = MagicMock(spec=Message)
     message.message_id = 12345
@@ -215,8 +177,17 @@ def mock_message(mock_telegram_user: TelegramUser, mock_chat: Chat, mock_bot: Bo
     message.photo = None
     message.is_topic_message = False
     message.message_thread_id = None
-    message.reply = AsyncMock()
-    message.answer = AsyncMock()
+
+    # Create a dummy message to be returned by answer/reply
+    sent_message = MagicMock(spec=Message)
+    sent_message.message_id = 54321
+
+    # Configure AsyncMocks for awaitable methods
+    message.reply = AsyncMock(return_value=sent_message)
+    message.answer = AsyncMock(return_value=sent_message)
+    message.edit_text = AsyncMock(return_value=sent_message) # Added edit_text
+    message.delete = AsyncMock(return_value=True)
+
     return message
 
 @pytest.fixture
@@ -233,37 +204,7 @@ def mock_message_with_photo(mock_message: Message) -> Message:
     mock_message.caption = "Test caption with report1"
     return mock_message
 
-@pytest.fixture
-def mock_message_topic(mock_message: Message) -> Message:
-    """mock telegram message in topic"""
-    mock_message.is_topic_message = True
-    mock_message.message_thread_id = 42
-    return mock_message
-
-# --- dispatcher mock ---
-@pytest.fixture
-def mock_dispatcher() -> Dispatcher:
-    """mock aiogram dispatcher"""
-    dp = MagicMock(spec=Dispatcher)
-    dp.message = MagicMock()
-    return dp
-
 # --- helper fixtures ---
-@pytest.fixture
-def sample_photo_bytes() -> bytes:
-    """sample photo data for testing"""
-    # minimal valid JPEG
-    return (
-        b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'
-        b'\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c'
-        b'\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c'
-        b'\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x0b\x08\x00'
-        b'\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00'
-        b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\t\xff\xc4\x00\x14\x10\x01'
-        b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff'
-        b'\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9'
-    )
-
 @pytest.fixture
 def mock_datetime_now(monkeypatch):
     """mock datetime.now()"""
@@ -280,33 +221,26 @@ def mock_datetime_now(monkeypatch):
     monkeypatch.setattr("datetime.date", MockDatetime)
     return MockDatetime
 
-# --- markers ---
-def pytest_collection_modifyitems(config, items):
-    """automatically mark test"""
-    for item in items:
-        # mark async tests
-        if asyncio.iscoroutinefunction(item.function):
-            item.add_marker(pytest.mark.asyncio)
 
-        # mark by directory
-        if "unit" in str(item.fspath):
-            item.add_marker(pytest.mark.unit)
-        elif "integration" in str(item.fspath):
-            item.add_marker(pytest.mark.integration)
+@pytest.mark.asyncio
+async def test_add_event(async_session, mock_message, mock_state, test_channel):
+    """Test /add_event (Standard)"""
+    # 1. Command
+    await cmd_add_event_interactive(mock_message, mock_state)
 
-# --- utilities ---
-class AsyncIterator:
-    """helper for mocking async iterators"""
-    def __init__(self, items):
-        self.items = items
-        self.index = 0
+    # FIX: Expect 54321 (the bot's reply ID), NOT 12345 (the user's message ID)
+    mock_state.update_data.assert_called_with(
+        command="add_event",
+        prompt_message_id=54321
+    )
 
-    def __aiter__(self):
-        return self
+    # 2. Input
+    mock_message.text = '"Regular Check" 10:00 1'
+    mock_message.chat.id = test_channel.telegram_id
+    mock_state.get_data.return_value = {"command": "add_event"}
 
-    async def __anext__(self):
-        if self.index >= len(self.items):
-            raise StopAsyncIteration
-        item = self.items[self.index]
-        self.index += 1
-        return item
+    await process_event_params_input(mock_message, mock_state, async_session)
+
+    events = await EventCRUD.get_active_by_channel(async_session, test_channel.id)
+    assert len(events) == 1
+    assert events[0].keyword == "Regular Check"
