@@ -159,7 +159,7 @@ admin_commands = user_commands + [
 
 ```python
 import os
-from bot.utils.google_sheets_exporter import GoogleSheetsExporter
+from utils.google_sheets_exporter import GoogleSheetsExporter
 
 # Проверяем переменные окружения
 print("Credentials path:", os.getenv('GOOGLE_SHEETS_CREDENTIALS_PATH'))

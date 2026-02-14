@@ -2,14 +2,13 @@
 Экспортер статистики в Excel файл
 """
 import asyncio
-import os
 import logging
-from typing import Dict, List
+import os
 from datetime import datetime
+from typing import Dict, List
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +18,11 @@ class ExcelExporter:
 
     # Цвета для форматирования (hex)
     COLORS = {
-        'header': '4285F4',  # Синий Google
-        'subheader': 'F0F0F0',  # Светло-серый
-        'warning': 'FFF4CC',  # Светло-желтый
-        'error': 'FFE6E6',  # Светло-красный
-        'success': 'D9EAD3',  # Светло-зеленый
+        'header': '4285F4',    # Синий Google
+        'subheader': 'F0F0F0', # Светло-серый
+        'warning': 'FFF4CC',   # Светло-желтый
+        'error': 'FFE6E6',     # Светло-красный
+        'success': 'D9EAD3',   # Светло-зеленый
     }
 
     def __init__(self):
@@ -47,11 +46,13 @@ class ExcelExporter:
             ws = wb.active
             ws.title = "Статистика"
 
+            # ВАЖНО: Эти функции теперь синхронные (без async)
             self._fill_worksheet(ws, stats_data)
-            self._apply_formatting(ws, stats_data)
+            self._apply_formatting(ws)
             self._auto_resize_columns(ws)
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
             # Убираем опасные символы из имени файла
             safe_title = "".join([c for c in stats_data['channel'].title if c.isalnum() or c in (' ', '_')]).strip()
             channel_name = safe_title.replace(' ', '_')
@@ -67,8 +68,8 @@ class ExcelExporter:
             logger.error(f"Error creating Excel file: {e}", exc_info=True)
             raise
 
-    async def _fill_worksheet(self, ws, stats_data: Dict):
-        """Заполняет лист данными"""
+    def _fill_worksheet(self, ws, stats_data: Dict):
+        """Заполняет лист данными (Synchronous)"""
         channel = stats_data['channel']
         timestamp = stats_data['timestamp']
         events = stats_data['events']
@@ -77,21 +78,24 @@ class ExcelExporter:
 
         # === ЗАГОЛОВОК ===
         ws.cell(row, 1, f"📊 Статистика: {channel.title}")
-        ws.cell(row, 2, f"На момент: {timestamp.strftime('%d.%m.%Y %H:%M')}")
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=1)
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+
+        row += 1
+        ws.cell(row, 1, f"На момент: {timestamp.strftime('%d.%m.%Y %H:%M')}")
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+
         row += 2
 
         # Заголовки колонок
         headers = ["Событие", "Тип", "Дедлайн", "Статус", "Магазин/Пользователь", "Детали"]
         for col, header in enumerate(headers, start=1):
             ws.cell(row, col, header)
-        row += 1
 
+        row += 1
         start_data_row = row  # Запоминаем начало данных
 
         # === ОБЫЧНЫЕ СОБЫТИЯ ===
-        for item in events['regular']:
+        for item in events.get('regular', []):
             event = item['event']
             not_submitted = item['not_submitted']
 
@@ -105,7 +109,7 @@ class ExcelExporter:
                 row += 1
 
         # === ВРЕМЕННЫЕ СОБЫТИЯ ===
-        for item in events['temp']:
+        for item in events.get('temp', []):
             temp_event = item['event']
             not_submitted = item['not_submitted']
 
@@ -119,12 +123,12 @@ class ExcelExporter:
                 row += 1
 
         # === CHECKOUT СОБЫТИЯ ===
-        for item in events['checkout']:
+        for item in events.get('checkout', []):
             cev = item['event']
             checkout_stats = item['stats']
 
             # Не сдали первый этап
-            for store_id, users_list in checkout_stats['not_submitted_first']:
+            for store_id, users_list in checkout_stats.get('not_submitted_first', []):
                 ws.cell(row, 1, cev.first_keyword)
                 ws.cell(row, 2, "Checkout (1 этап)")
                 ws.cell(row, 3, cev.first_deadline_time.strftime('%H:%M'))
@@ -134,7 +138,7 @@ class ExcelExporter:
                 row += 1
 
             # Не начали второй этап
-            for store_id, users_list in checkout_stats['not_submitted_second']:
+            for store_id, users_list in checkout_stats.get('not_submitted_second', []):
                 ws.cell(row, 1, cev.second_keyword)
                 ws.cell(row, 2, "Checkout (2 этап)")
                 ws.cell(row, 3, cev.second_deadline_time.strftime('%H:%M'))
@@ -144,7 +148,7 @@ class ExcelExporter:
                 row += 1
 
             # Сдали частично
-            for store_id, users_list, remaining in checkout_stats['partial_second']:
+            for store_id, users_list, remaining in checkout_stats.get('partial_second', []):
                 ws.cell(row, 1, cev.second_keyword)
                 ws.cell(row, 2, "Checkout (2 этап)")
                 ws.cell(row, 3, cev.second_deadline_time.strftime('%H:%M'))
@@ -154,7 +158,7 @@ class ExcelExporter:
                 row += 1
 
             # Не сдали ничего
-            for store_id, users_list in checkout_stats['not_submitted_anything']:
+            for store_id, users_list in checkout_stats.get('not_submitted_anything', []):
                 ws.cell(row, 1, cev.first_keyword)
                 ws.cell(row, 2, "Checkout")
                 ws.cell(row, 3, cev.first_deadline_time.strftime('%H:%M'))
@@ -164,7 +168,7 @@ class ExcelExporter:
                 row += 1
 
         # === NOTEXT СОБЫТИЯ ===
-        for item in events['notext']:
+        for item in events.get('notext', []):
             notext_event = item['event']
             not_submitted = item['not_submitted']
 
@@ -179,7 +183,7 @@ class ExcelExporter:
                 row += 1
 
         # === KEYWORD СОБЫТИЯ ===
-        for item in events['keyword']:
+        for item in events.get('keyword', []):
             keyword_event = item['event']
             not_submitted = item['not_submitted']
 
@@ -201,8 +205,8 @@ class ExcelExporter:
         # Сохраняем последнюю строку для форматирования
         ws._last_data_row = row
 
-    async def _apply_formatting(self, ws, stats_data: Dict):
-        """Применяет форматирование к таблице"""
+    def _apply_formatting(self, ws):
+        """Применяет форматирование к таблице (Synchronous)"""
 
         # Шрифты
         header_font = Font(name='Arial', size=14, bold=True, color='FFFFFF')
@@ -229,25 +233,43 @@ class ExcelExporter:
             bottom=Side(style='thin')
         )
 
-        # Заголовок (строка 1)
-        for col in range(1, 7):
-            cell = ws.cell(1, col)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = left_alignment
+        # Заголовок (строка 1 и 2)
+        # Применяем стиль к первой ячейке объединенного диапазона
+        cell_1 = ws.cell(1, 1)
+        cell_1.font = header_font
+        cell_1.fill = header_fill
+        cell_1.alignment = left_alignment
 
-        # Заголовки колонок (строка 3)
+        cell_2 = ws.cell(2, 1)
+        cell_2.font = Font(name='Arial', size=12, bold=False, color='FFFFFF')
+        cell_2.fill = header_fill
+        cell_2.alignment = left_alignment
+
+        # Заголовки колонок (строка 4)
         for col in range(1, 7):
-            cell = ws.cell(3, col)
+            cell = ws.cell(4, col)
             cell.font = subheader_font
             cell.fill = subheader_fill
             cell.alignment = center_alignment
             cell.border = thin_border
 
-        # Данные (с 4 строки)
+        # Данные (с 5 строки)
         last_row = getattr(ws, '_last_data_row', ws.max_row)
 
-        for row_idx in range(4, last_row + 1):
+        for row_idx in range(5, last_row + 1):
+
+            # Определяем цвет строки по статусу
+            status_cell = ws.cell(row_idx, 4)
+            status_text = status_cell.value or ""
+
+            row_fill = None
+            if "❌" in status_text:
+                row_fill = error_fill
+            elif "⚠️" in status_text:
+                row_fill = warning_fill
+            elif "✅" in status_text or "🎉" in status_text:
+                row_fill = success_fill
+
             for col_idx in range(1, 7):
                 cell = ws.cell(row_idx, col_idx)
                 cell.font = normal_font
@@ -263,29 +285,16 @@ class ExcelExporter:
                 if col_idx in [5, 6]:
                     cell.alignment = wrap_alignment
 
-            # Цветовое кодирование по статусу
-            status_cell = ws.cell(row_idx, 4)
-            status_text = status_cell.value or ""
-
-            if "❌" in status_text:
-                fill = error_fill
-            elif "⚠️" in status_text:
-                fill = warning_fill
-            elif "✅" in status_text or "🎉" in status_text:
-                fill = success_fill
-            else:
-                continue
-
-            # Применяем заливку ко всей строке
-            for col_idx in range(1, 7):
-                ws.cell(row_idx, col_idx).fill = fill
+                # Применяем заливку если она определена
+                if row_fill:
+                    cell.fill = row_fill
 
     def _auto_resize_columns(self, ws):
         """Автоматический подбор ширины колонок"""
         column_widths = {
             'A': 25,  # Событие
             'B': 20,  # Тип
-            'C': 12,  # Дедлайн
+            'C': 15,  # Дедлайн
             'D': 20,  # Статус
             'E': 30,  # Магазин/Пользователь
             'F': 35,  # Детали

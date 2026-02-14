@@ -21,7 +21,7 @@ from bot.database.crud import (
     KeywordEventCRUD, KeywordReportCRUD
 )
 from bot.handlers.admin.utils import is_admin
-from bot.utils.user_grouping import group_users_by_store, format_store_mention
+from utils.user_grouping import group_users_by_store, format_store_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -544,7 +544,7 @@ async def _export_to_google_sheets(
         URL таблицы
     """
     # Этот файл будет создан отдельно
-    from bot.utils.google_sheets_exporter import GoogleSheetsExporter
+    from utils.google_sheets_exporter import GoogleSheetsExporter
 
     exporter = GoogleSheetsExporter()
     sheet_url = await exporter.export_stats(stats_data)
@@ -564,7 +564,7 @@ async def _create_excel_file(
         Путь к созданному файлу
     """
     # Этот файл будет создан отдельно
-    from bot.utils.excel_exporter import ExcelExporter
+    from utils.excel_exporter import ExcelExporter
 
     exporter = ExcelExporter()
     file_path = await exporter.export_stats(stats_data)

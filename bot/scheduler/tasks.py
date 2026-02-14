@@ -14,11 +14,10 @@ from bot.database.crud import (
 )
 from bot.database.engine import async_session_maker
 from bot.database.models import User
-from bot.utils.user_grouping import (
+from utils.user_grouping import (
     group_users_by_store,
     format_store_mention,
-    get_store_users_list,
-    has_store_submitted_report
+    get_store_users_list
 )
 
 logger = logging.getLogger(__name__)

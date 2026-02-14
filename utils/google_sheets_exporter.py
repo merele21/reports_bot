@@ -27,13 +27,13 @@ class GoogleSheetsExporter:
     }
 
     def __init__(self):
-        """Инициализация с учетными данными из переменных окружения"""
         self.credentials_path = os.getenv('GOOGLE_SHEETS_CREDENTIALS_PATH')
         self.spreadsheet_id = os.getenv('GOOGLE_SHEETS_STATS_SPREADSHEET_ID')
+        self.client = None  # Initialize as None first
 
         if not self.spreadsheet_id:
             logger.error("No Google Sheet ID provided in env vars")
-            return
+            return  # Returns, but self.client now exists (as None)
 
         # Инициализация клиента
         self.client = self._init_client()

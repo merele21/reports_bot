@@ -22,3 +22,10 @@ imagehash==4.3.1
 
 # Development Tools (опционально, для hot reload)
 watchdog==4.0.0
+
+# Google Sheets
+gspread==6.0.0
+google-auth==2.27.0
+
+# Excel export
+openpyxl==3.1.2
